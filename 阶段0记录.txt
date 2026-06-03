@@ -1,0 +1,292 @@
+阶段 0：实验环境准备记录
+
+一、阶段目标
+
+本阶段目标是在 VMware Workstation 中搭建三台虚拟机，分别作为 SSH 管理实验的管理端、SSH 目标端和攻击端，并配置 NAT + Host-only 双网卡网络环境，确保三台虚拟机在隔离实验网络中互通，同时能够通过 NAT 网络访问互联网以安装软件包。
+
+本阶段不安装 OpenSSH Server，不搭建 Flask 平台，也不进行攻击实验。OpenSSH 服务搭建从阶段 1 开始。
+
+二、实验虚拟机规划
+
+本实验共使用三台虚拟机：
+
+1. VM1：SSH-VM1
+   - 系统：Ubuntu Desktop
+   - 角色：管理端
+   - 用途：后续部署 Flask SSH 管理平台，并通过 SSH 管理 VM2
+
+2. VM2：SSH-VM2
+   - 系统：Ubuntu Server
+   - 角色：SSH 目标机 / 被管理端
+   - 用途：后续运行 OpenSSH Server，保存认证日志 auth.log，部署 Fail2ban，并作为攻击实验目标
+
+3. VM3：SSH-VM3
+   - 系统：Kali Linux
+   - 角色：攻击端
+   - 用途：后续执行 SSH 弱口令攻击脚本，并模拟私钥泄露登录
+
+三、ISO 文件准备
+
+阶段 0 开始前，已准备以下三个系统 ISO 镜像：
+
+1. Ubuntu Desktop ISO
+   - 用于安装 VM1 管理端
+
+2. Ubuntu Server ISO
+   - 用于安装 VM2 SSH 目标机
+
+3. Kali Linux ISO
+   - 用于安装 VM3 攻击端
+
+四、VMware 网络规划
+
+本实验未修改现有 VMware 全局网络配置，直接沿用当前 VMware 中已有的网络：
+
+1. VMnet8：NAT 模式
+   - 子网：192.168.142.0/24
+   - 用途：虚拟机访问互联网，执行 apt update 和软件安装
+
+2. VMnet1：Host-only / 仅主机模式
+   - 子网：192.168.45.0/24
+   - 用途：构建隔离实验网络，使 VM1、VM2、VM3 之间互通
+
+采用 NAT + Host-only 双网卡的原因：
+
+1. NAT 网卡保证虚拟机可以联网更新软件包。
+2. Host-only 网卡用于实验内部通信，避免 SSH 服务暴露到外部局域网或公网。
+3. 不使用桥接模式，降低实验对外部网络的影响。
+
+五、三台虚拟机网络配置
+
+三台虚拟机均配置两张网卡：
+
+1. 第一张网卡：NAT 模式
+2. 第二张网卡：Host-only / 仅主机模式
+
+最终 IP 配置如下：
+
+1. VM1 管理端 SSH-VM1
+   - NAT 网卡：ens33
+   - NAT IP：192.168.142.132/24
+   - Host-only 网卡：ens36
+   - Host-only IP：192.168.45.101/24
+
+2. VM2 目标机 SSH-VM2
+   - NAT 网卡：ens33
+   - NAT IP：192.168.142.131/24
+   - Host-only 网卡：ens34
+   - Host-only IP：192.168.45.102/24
+
+3. VM3 攻击端 SSH-VM3
+   - NAT 网卡：eth0
+   - NAT IP：192.168.142.134/24
+   - Host-only 网卡：eth1
+   - Host-only IP：192.168.45.103/24
+
+六、VM1 网络配置过程
+
+VM1 安装 Ubuntu Desktop 后，系统识别出两张网卡：
+
+1. ens33：NAT 网卡，自动获取 192.168.142.132/24
+2. ens36：Host-only 网卡，初始通过 DHCP 获取 192.168.45.131/24
+
+随后将 ens36 修改为静态地址：
+
+- IP 地址：192.168.45.101/24
+- 网关：不设置
+- DNS：不设置
+
+配置完成后，通过以下命令验证：
+
+ip -br addr
+
+验证结果显示：
+
+- ens33：192.168.142.132/24
+- ens36：192.168.45.101/24
+
+说明 VM1 的 NAT 与 Host-only 网络均配置成功。
+
+七、VM2 网络配置过程
+
+VM2 安装 Ubuntu Server 后，在网络配置阶段识别出两张网卡：
+
+1. ens33：NAT 网卡，自动获取 192.168.142.131/24
+2. ens34：Host-only 网卡，设置为静态地址 192.168.45.102/24
+
+配置原则：
+
+- ens33 使用 DHCP，用于联网
+- ens34 使用静态 IP，用于实验网络
+- ens34 不配置网关，避免默认路由错误
+
+配置完成后，通过以下命令验证：
+
+ip -br addr
+
+验证结果显示：
+
+- ens33：192.168.142.131/24
+- ens34：192.168.45.102/24
+
+说明 VM2 的 NAT 与 Host-only 网络均配置成功。
+
+八、VM3 网络配置过程
+
+VM3 安装 Kali Linux 后，系统识别出两张网卡：
+
+1. eth0：NAT 网卡
+2. eth1：Host-only 网卡
+
+初始状态下，eth1 通过 DHCP 获取了 192.168.45.130/24，eth0 未正常连接。随后使用 NetworkManager 对两张网卡重新建立连接配置。
+
+先删除原有连接：
+
+sudo nmcli con delete "Wired connection 1"
+
+然后为 eth1 创建 Host-only 静态 IP 连接：
+
+sudo nmcli con add type ethernet ifname eth1 con-name hostonly-eth1 ipv4.method manual ipv4.addresses 192.168.45.103/24 ipv4.gateway "" ipv4.dns "" ipv4.never-default yes
+
+再为 eth0 创建 NAT 自动获取 IP 连接：
+
+sudo nmcli con add type ethernet ifname eth0 con-name nat-eth0 ipv4.method auto
+
+启动两个连接：
+
+sudo nmcli con up hostonly-eth1
+sudo nmcli con up nat-eth0
+
+配置完成后，通过以下命令验证：
+
+ip -br addr
+ip route
+
+验证结果显示：
+
+- eth0：192.168.142.134/24
+- eth1：192.168.45.103/24
+- 默认路由：default via 192.168.142.2 dev eth0
+
+说明 VM3 的 NAT 与 Host-only 网络均配置成功，且默认路由正确走 NAT 网卡 eth0。
+
+九、连通性测试
+
+完成三台虚拟机网络配置后，进行了以下连通性测试。
+
+1. VM1 ping VM2
+
+命令：
+
+ping -c 4 192.168.45.102
+
+结果：
+
+4 packets transmitted, 4 received, 0% packet loss
+
+说明 VM1 管理端能够访问 VM2 目标机。
+
+2. VM1 ping VM3
+
+命令：
+
+ping -c 4 192.168.45.103
+
+结果：
+
+4 packets transmitted, 4 received, 0% packet loss
+
+说明 VM1 管理端能够访问 VM3 攻击端。
+
+3. VM2 ping VM1
+
+命令：
+
+ping -c 4 192.168.45.101
+
+结果：
+
+4 packets transmitted, 4 received, 0% packet loss
+
+说明 VM2 目标机能够访问 VM1 管理端。
+
+4. VM3 ping VM2
+
+命令：
+
+ping -c 4 192.168.45.102
+
+结果：
+
+4 packets transmitted, 4 received, 0% packet loss
+
+说明 VM3 攻击端能够访问 VM2 目标机，后续可以对 VM2 执行 SSH 攻击实验。
+
+十、联网验证
+
+为验证 NAT 网络可用，分别在 VM1、VM2、VM3 上执行：
+
+sudo apt update
+
+三台机器均完成 apt update 验证，说明 NAT 网络可以正常访问软件源，后续可以安装 openssh-server、python3、flask、paramiko、fail2ban 等实验所需软件包。
+
+十一、阶段 0 截图记录
+
+本阶段建议保留以下截图作为报告证据：
+
+1. VM1 的 ip -br addr 输出截图
+   - 证明 VM1 同时具有 NAT 地址 192.168.142.132 和 Host-only 地址 192.168.45.101
+
+2. VM2 的 ip -br addr 输出截图
+   - 证明 VM2 同时具有 NAT 地址 192.168.142.131 和 Host-only 地址 192.168.45.102
+
+3. VM3 的 ip -br addr 和 ip route 输出截图
+   - 证明 VM3 同时具有 NAT 地址 192.168.142.134 和 Host-only 地址 192.168.45.103，默认路由经 eth0 走 NAT
+
+4. VM1 ping VM2 成功截图
+   - 证明管理端能够访问 SSH 目标机
+
+5. VM1 ping VM3 成功截图
+   - 证明管理端能够访问攻击端
+
+6. VM2 ping VM1 成功截图
+   - 证明目标机能够访问管理端
+
+7. VM3 ping VM2 成功截图
+   - 证明攻击端能够访问目标机
+
+8. 三台机器 sudo apt update 成功截图
+   - 证明 NAT 网络联网正常
+
+建议截图目录：
+
+screenshots/01_environment/
+├── 01_VM1_ip_addr.png
+├── 02_VM2_ip_addr.png
+├── 03_VM3_ip_addr_route.png
+├── 04_VM1_ping_VM2.png
+├── 05_VM1_ping_VM3.png
+├── 06_VM2_ping_VM1.png
+├── 07_VM3_ping_VM2.png
+├── 08_VM1_apt_update.png
+├── 09_VM2_apt_update.png
+└── 10_VM3_apt_update.png
+
+十二、阶段 0 验收结论
+
+阶段 0 已完成，当前实验环境满足以下条件：
+
+1. 已获得 Ubuntu Desktop、Ubuntu Server、Kali Linux 三个系统 ISO 文件。
+2. 已在 VMware 中创建并安装三台虚拟机。
+3. VM1 作为管理端，VM2 作为 SSH 目标机，VM3 作为攻击端。
+4. 三台虚拟机均配置 NAT + Host-only 双网卡。
+5. NAT 网络使用 192.168.142.0/24，用于联网。
+6. Host-only 实验网络使用 192.168.45.0/24，用于虚拟机间通信。
+7. VM1 的实验 IP 为 192.168.45.101。
+8. VM2 的实验 IP 为 192.168.45.102。
+9. VM3 的实验 IP 为 192.168.45.103。
+10. VM1、VM2、VM3 在 Host-only 实验网络中互通。
+11. 三台虚拟机均已完成 sudo apt update 联网验证。
+12. 实验网络未使用桥接模式，SSH 服务后续不会暴露到外部网络。
+
+因此，阶段 0 的实验环境准备工作已经完成，可以进入阶段 1：在 VM2 上安装并配置 OpenSSH Server，创建 testuser 弱口令实验账号，并从 VM1 测试登录 VM2。

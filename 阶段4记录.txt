@@ -1,0 +1,877 @@
+阶段 4：实现平台核心功能并联调记录
+
+一、阶段目标
+
+本阶段目标是在阶段 3 已完成 Flask 基础框架的基础上，进一步实现 SSH 管理原型平台的核心功能，使平台不再只是占位页面，而是能够通过 SSH 连接 VM2 目标机并完成基础管理、日志查看和安全配置检查。
+
+阶段 4 主要完成以下功能：
+
+1. SSH 连接测试
+   - VM1 平台通过 Paramiko 连接 VM2
+   - 执行 whoami、hostname 验证连接是否成功
+
+2. 白名单命令执行
+   - 平台只允许执行预设命令
+   - 不开放任意命令输入
+   - 支持 whoami、hostname、uptime、systemctl status ssh、tail auth.log 等检测命令
+
+3. auth.log 日志查看与统计
+   - 平台通过 SSH 读取 VM2 的 /var/log/auth.log
+   - 识别 Failed password、Accepted password、Accepted publickey、invalid user 等关键日志
+   - 统计来源 IP、失败次数、尝试用户名和最近失败时间
+
+4. sshd -T 安全配置检查
+   - 平台通过 SSH 在 VM2 上执行 sshd -T
+   - 解析 OpenSSH 最终生效配置
+   - 展示 permitrootlogin、passwordauthentication、pubkeyauthentication、permitemptypasswords、maxauthtries、loglevel 等关键配置
+
+5. 平台安全边界控制
+   - 平台不保存密码
+   - 平台不开放任意命令执行
+   - VM2 仅为 testuser 配置受限 sudo 权限
+   - 只允许执行指定检测命令
+
+二、实验环境
+
+本阶段继续使用前面阶段已搭建好的三台虚拟机。
+
+1. VM1：SSH-VM1
+   - 角色：管理端
+   - 系统：Ubuntu Desktop
+   - Host-only IP：192.168.45.101
+   - 用途：部署 Flask SSH 管理平台
+
+2. VM2：SSH-VM2
+   - 角色：SSH 目标机 / 被管理端
+   - 系统：Ubuntu Server
+   - Host-only IP：192.168.45.102
+   - 用途：运行 OpenSSH Server，保存 auth.log，并作为平台管理目标
+
+3. VM3：SSH-VM3
+   - 角色：攻击端
+   - 系统：Kali Linux
+   - Host-only IP：192.168.45.103
+   - 用途：后续阶段执行弱口令攻击和私钥泄露实验
+
+本阶段平台默认连接参数：
+
+目标 IP：192.168.45.102
+SSH 端口：22
+用户名：testuser
+认证方式：密码认证
+实验密码：123456
+
+三、阶段 4 实施思路
+
+阶段 3 的 app.py 和 HTML 页面只是基础框架与占位页面，并没有真正连接 VM2，也没有执行真实 SSH 命令。因此阶段 4 需要对平台代码进行升级。
+
+本阶段不是推倒重来，而是在原有项目结构基础上进行功能增强：
+
+1. 备份阶段 3 文件
+2. 升级 app.py 后端逻辑
+3. 增加或替换功能页面模板
+4. 补充页面样式
+5. 启动 Flask 平台
+6. 逐项验证平台功能
+
+阶段 4 中使用 Paramiko 实现 SSH 连接，平台通过表单接收目标 IP、端口、用户名和认证凭据，并在后端建立 SSH 会话。连接成功后，平台只执行预先定义好的白名单命令。
+
+四、VM2 配置受限 sudo 权限
+
+1. 配置目的
+
+在 VM2 上，普通用户 testuser 可以执行 whoami、hostname、uptime 等普通命令，但读取 /var/log/auth.log、查看 systemctl status ssh、执行 sshd -T 等操作通常需要更高权限。
+
+为了避免给 testuser 开放完整 sudo 权限，本阶段采用受限 sudo 方式，只允许 testuser 免密执行指定检测命令。
+
+这样既能满足平台功能需求，又能控制实验平台自身风险。
+
+2. 在 VM2 上确认命令路径
+
+在 VM2 上执行：
+
+command -v tail
+command -v systemctl
+command -v sshd
+
+正常结果通常为：
+
+/usr/bin/tail
+/usr/bin/systemctl
+/usr/sbin/sshd
+
+这些路径后续会写入 sudoers 配置中。
+
+3. 创建 sudoers 配置文件
+
+在 VM2 上执行：
+
+sudo visudo -f /etc/sudoers.d/ssh_platform_stage4
+
+写入以下内容：
+
+testuser ALL=(root) NOPASSWD: /usr/bin/tail -n 100 /var/log/auth.log, /usr/bin/tail -n 200 /var/log/auth.log, /usr/bin/systemctl status ssh --no-pager, /usr/sbin/sshd -T
+
+保存退出后，设置权限：
+
+sudo chmod 440 /etc/sudoers.d/ssh_platform_stage4
+
+检查 sudoers 配置语法：
+
+sudo visudo -c
+
+预期结果中应看到：
+
+/etc/sudoers: parsed OK
+/etc/sudoers.d/ssh_platform_stage4: parsed OK
+
+4. 验证 testuser 的受限 sudo
+
+在 VM2 上切换到 testuser：
+
+su - testuser
+
+输入密码：
+
+123456
+
+执行以下验证命令：
+
+sudo -n /usr/bin/tail -n 100 /var/log/auth.log
+sudo -n /usr/bin/tail -n 200 /var/log/auth.log
+sudo -n /usr/bin/systemctl status ssh --no-pager
+sudo -n /usr/sbin/sshd -T | grep -E '^(permitrootlogin|passwordauthentication|pubkeyauthentication|permitemptypasswords|maxauthtries|loglevel)'
+
+如果能够正常输出，说明平台后续通过 SSH 登录 testuser 后，也可以执行这些受限检测命令。
+
+验证完成后退出：
+
+exit
+
+五、VM1 备份阶段 3 平台代码
+
+在 VM1 上进入项目目录：
+
+cd ~/ssh_manage_platform
+
+备份阶段 3 的代码文件：
+
+cp app.py app_stage3_backup.py
+cp templates/index.html templates/index_stage3_backup.html
+cp templates/result.html templates/result_stage3_backup.html
+cp templates/logs.html templates/logs_stage3_backup.html
+cp templates/security.html templates/security_stage3_backup.html
+
+如果存在 commands.html，也可以执行：
+
+cp templates/commands.html templates/commands_stage3_backup.html 2>/dev/null
+
+备份目的：
+
+1. 保留阶段 3 的可运行版本
+2. 便于阶段 4 出现代码错误时快速恢复
+3. 体现实验过程中的版本管理意识
+
+恢复方式示例：
+
+cp app_stage3_backup.py app.py
+
+六、VM1 升级 app.py 后端逻辑
+
+1. app.py 升级目的
+
+阶段 3 的 app.py 只实现了页面路由和占位结果，不真正连接 VM2。阶段 4 对 app.py 进行升级，使其具备以下能力：
+
+1. 使用 Paramiko 创建 SSH 连接
+2. 支持密码认证和后续私钥认证
+3. 执行远程命令
+4. 限制远程命令只能来自白名单
+5. 读取 VM2 的 auth.log
+6. 解析 SSH 登录日志
+7. 执行 sshd -T
+8. 解析 SSH 安全配置
+9. 将结果渲染到 Web 页面
+
+2. app.py 中的主要功能模块
+
+升级后的 app.py 包含以下核心部分：
+
+1. DEFAULT_TARGET
+   - 保存默认目标主机信息
+   - 默认目标为 192.168.45.102:22
+   - 默认用户为 testuser
+
+2. WHITELIST_COMMANDS
+   - 定义允许执行的白名单命令
+   - 包括 whoami、hostname、uptime、systemctl status ssh、tail auth.log
+   - 平台不允许用户输入任意命令
+
+3. SECURITY_ITEMS
+   - 定义 sshd -T 安全检查关注项
+   - 包括 permitrootlogin、passwordauthentication、pubkeyauthentication、permitemptypasswords、maxauthtries、loglevel
+
+4. create_ssh_client()
+   - 使用 Paramiko 创建 SSH 连接
+   - 支持 password 认证
+   - 预留 key 私钥认证方式
+   - 设置连接超时时间
+
+5. run_remote_command()
+   - 通过 SSH 执行远程命令
+   - 返回 stdout、stderr 和退出码
+
+6. parse_auth_log()
+   - 解析 auth.log
+   - 统计 Failed password
+   - 提取 Accepted password 和 Accepted publickey
+   - 提取关键原始日志
+
+7. parse_sshd_T()
+   - 解析 sshd -T 输出
+   - 生成安全检查表格数据
+
+8. Flask 路由
+   - /
+   - /connect
+   - /commands
+   - /commands/run
+   - /logs
+   - /security
+
+七、平台路由功能说明
+
+1. 首页 /
+
+首页用于显示目标主机连接表单和功能入口。
+
+页面默认显示：
+
+目标 IP：192.168.45.102
+端口：22
+用户名：testuser
+认证方式：密码认证 / 私钥认证
+密码或私钥路径输入框
+连接测试按钮
+白名单命令执行入口
+auth.log 日志查看入口
+sshd -T 安全检查入口
+
+2. /connect
+
+/connect 用于 SSH 连接测试。
+
+提交参数：
+
+目标 IP
+SSH 端口
+用户名
+认证方式
+密码或私钥路径
+
+平台收到表单后：
+
+1. 使用 Paramiko 连接 VM2
+2. 连接成功后执行 whoami
+3. 继续执行 hostname
+4. 将结果显示在 result.html 中
+
+预期结果：
+
+连接成功
+whoami 输出：testuser
+hostname 输出：VM2 主机名
+
+如果连接失败，页面显示失败原因，例如：
+
+Authentication failed
+timed out
+Unable to connect to port 22
+
+3. /commands
+
+/commands 是白名单命令执行页面。
+
+页面提供下拉框选择命令，不提供任意命令输入框。
+
+白名单命令包括：
+
+1. whoami
+2. hostname
+3. uptime
+4. systemctl status ssh --no-pager
+5. tail -n 100 /var/log/auth.log
+
+4. /commands/run
+
+/commands/run 接收命令执行表单。
+
+后端流程：
+
+1. 检查 command_key 是否在 WHITELIST_COMMANDS 中
+2. 如果不在白名单中，拒绝执行
+3. 如果在白名单中，连接 VM2
+4. 执行对应命令
+5. 显示标准输出、错误输出和执行状态
+
+该设计体现了平台安全边界：
+
+平台只允许执行预设检测命令，不允许任意命令执行。
+
+5. /logs
+
+/logs 用于读取和分析 VM2 的 auth.log。
+
+平台执行命令：
+
+sudo -n /usr/bin/tail -n 200 /var/log/auth.log
+
+然后解析以下关键字：
+
+Failed password
+Accepted password
+Accepted publickey
+invalid user
+Ban
+banned
+
+页面展示：
+
+1. Failed password 统计表
+   - 来源 IP
+   - 失败次数
+   - 尝试用户名
+   - 最近失败时间
+   - 是否疑似暴力破解
+
+2. 成功登录记录
+   - 时间
+   - 认证方式
+   - 用户
+   - 来源 IP
+
+3. 关键原始日志
+   - 展示最近的关键 SSH 认证日志
+
+6. /security
+
+/security 用于执行 sshd -T 安全检查。
+
+平台执行命令：
+
+sudo -n /usr/sbin/sshd -T
+
+然后解析以下配置项：
+
+permitrootlogin
+passwordauthentication
+pubkeyauthentication
+permitemptypasswords
+maxauthtries
+loglevel
+
+页面展示：
+
+1. 检查项
+2. 当前值
+3. 建议值
+4. 风险说明
+
+预期当前阶段的检查结果为：
+
+permitrootlogin：no
+passwordauthentication：yes
+pubkeyauthentication：yes
+permitemptypasswords：no
+maxauthtries：6
+loglevel：VERBOSE
+
+其中 passwordauthentication yes 是后续弱口令攻击实验前的重要证据。后续防御阶段会将其改为 no。
+
+八、VM1 新增和修改页面模板
+
+1. result.html
+
+result.html 用于显示 SSH 连接测试结果。
+
+升级后页面显示：
+
+1. 连接状态
+2. 说明信息
+3. 目标 IP
+4. 端口
+5. 用户名
+6. 认证方式
+7. 远程命令输出
+8. 错误信息
+
+2. commands.html
+
+commands.html 是阶段 4 新增或正式启用的页面。
+
+页面功能：
+
+1. 输入目标 IP、端口、用户名和认证凭据
+2. 通过下拉框选择白名单命令
+3. 提交命令执行请求
+4. 显示命令执行结果
+
+页面安全设计：
+
+1. 不提供自由命令输入框
+2. 只允许选择预设命令
+3. 由后端再次检查命令是否在白名单中
+
+3. logs.html
+
+logs.html 升级为日志查看与统计页面。
+
+页面功能：
+
+1. 输入 SSH 连接信息
+2. 点击“读取并分析 auth.log”
+3. 显示 Failed password 统计表
+4. 显示成功登录记录
+5. 显示关键原始日志
+6. 显示读取错误信息
+
+4. security.html
+
+security.html 升级为 SSH 安全配置检查页面。
+
+页面功能：
+
+1. 输入 SSH 连接信息
+2. 点击“执行 sshd -T 安全检查”
+3. 显示安全检查结果表
+4. 显示 sshd -T 原始输出
+5. 显示错误信息
+
+九、补充页面样式
+
+在 static/style.css 中补充 pre 样式，用于美化命令输出和日志输出。
+
+追加内容：
+
+pre {
+    background: #0f172a;
+    color: #e5e7eb;
+    padding: 16px;
+    border-radius: 10px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    line-height: 1.5;
+    font-size: 13px;
+}
+
+.status-box {
+    margin-bottom: 16px;
+}
+
+作用：
+
+1. 让远程命令输出更清晰
+2. 让 auth.log 原始日志更适合截图
+3. 让 sshd -T 原始输出更易阅读
+
+十、检查项目结构
+
+在 VM1 上执行：
+
+cd ~/ssh_manage_platform
+find . -maxdepth 3 -type f | sort
+
+阶段 4 后项目结构至少应包含：
+
+./README.md
+./app.py
+./requirements.txt
+./static/style.css
+./templates/commands.html
+./templates/index.html
+./templates/logs.html
+./templates/result.html
+./templates/security.html
+
+同时还应保留阶段 3 备份文件，例如：
+
+./app_stage3_backup.py
+./templates/index_stage3_backup.html
+./templates/result_stage3_backup.html
+./templates/logs_stage3_backup.html
+./templates/security_stage3_backup.html
+
+十一、启动 Flask 平台
+
+在 VM1 上执行：
+
+cd ~/ssh_manage_platform
+source venv/bin/activate
+python app.py
+
+正常输出应包含：
+
+* Serving Flask app 'app'
+* Debug mode: on
+* Running on all addresses (0.0.0.0)
+* Running on http://127.0.0.1:5000
+* Running on http://192.168.45.101:5000
+
+浏览器访问：
+
+http://192.168.45.101:5000
+
+十二、功能验证过程
+
+1. SSH 连接测试验证
+
+浏览器访问：
+
+http://192.168.45.101:5000
+
+填写：
+
+目标 IP：192.168.45.102
+SSH 端口：22
+用户名：testuser
+认证方式：密码认证
+密码：123456
+
+点击：
+
+执行连接测试
+
+预期结果：
+
+连接成功
+平台已通过 Paramiko 成功连接 VM2，并执行 whoami、hostname 验证。
+
+远程命令输出应包含：
+
+whoami 输出：
+testuser
+
+hostname 输出：
+VM2 的主机名
+
+验证结论：
+
+平台已经能够通过 Paramiko 成功连接 VM2，说明 SSH 连接测试功能实现成功。
+
+2. 白名单命令执行验证
+
+浏览器访问：
+
+http://192.168.45.101:5000/commands
+
+填写连接信息：
+
+目标 IP：192.168.45.102
+端口：22
+用户名：testuser
+认证方式：密码认证
+密码：123456
+
+分别选择以下白名单命令测试：
+
+1. whoami
+2. hostname
+3. uptime
+4. systemctl status ssh --no-pager
+5. tail -n 100 /var/log/auth.log
+
+预期结果：
+
+1. whoami 输出 testuser
+2. hostname 输出 VM2 主机名
+3. uptime 输出系统运行时间和负载
+4. systemctl status ssh 显示 SSH 服务 active (running)
+5. tail auth.log 显示最近 SSH 认证日志
+
+验证结论：
+
+平台白名单命令执行功能正常，并且没有开放任意命令输入。
+
+3. auth.log 日志读取验证
+
+浏览器访问：
+
+http://192.168.45.101:5000/logs
+
+填写连接信息：
+
+目标 IP：192.168.45.102
+端口：22
+用户名：testuser
+认证方式：密码认证
+密码：123456
+
+点击：
+
+读取并分析 auth.log
+
+预期结果：
+
+页面能显示 VM2 的 SSH 认证日志。
+
+当前阶段至少应能看到 Accepted password 成功登录记录，例如：
+
+Accepted password for testuser from 192.168.45.101
+
+如果前面有输错密码或后续 VM3 攻击，会显示 Failed password 统计。
+
+验证结论：
+
+平台能够通过受限 sudo 读取 /var/log/auth.log，并能够解析 SSH 登录记录。
+
+4. Failed password 统计验证
+
+如果当前日志中没有 Failed password，可以在 VM1 上故意输错密码制造失败记录：
+
+ssh testuser@192.168.45.102
+
+故意输入错误密码，失败一两次后按 Ctrl + C 退出。
+
+然后重新进入平台 /logs 页面读取日志。
+
+预期结果：
+
+Failed password 统计表中出现来源 IP、失败次数、尝试用户名和最近失败时间。
+
+后续阶段 5 中，VM3 将执行弱口令攻击，届时平台会显示更多来自 192.168.45.103 的 Failed password 记录。
+
+5. sshd -T 安全检查验证
+
+浏览器访问：
+
+http://192.168.45.101:5000/security
+
+填写连接信息：
+
+目标 IP：192.168.45.102
+端口：22
+用户名：testuser
+认证方式：密码认证
+密码：123456
+
+点击：
+
+执行 sshd -T 安全检查
+
+预期结果：
+
+平台显示安全检查表格：
+
+permitrootlogin        no
+passwordauthentication yes
+pubkeyauthentication   yes
+permitemptypasswords   no
+maxauthtries           6
+loglevel               VERBOSE
+
+同时页面下方显示 sshd -T 原始输出。
+
+验证结论：
+
+平台能够读取 OpenSSH 最终生效配置，并能展示关键安全配置项。
+
+十三、常见问题与处理
+
+1. 连接失败：Authentication failed
+
+原因：
+
+1. 密码输入错误
+2. 用户名错误
+3. 认证方式选错
+4. VM2 上 testuser 密码不是 123456
+
+处理：
+
+在 VM1 终端手动测试：
+
+ssh testuser@192.168.45.102
+
+确认可以登录后，再回到平台测试。
+
+2. 连接失败：timed out 或 Unable to connect
+
+原因：
+
+1. VM2 SSH 服务未启动
+2. VM2 22 端口未监听
+3. VM1 到 VM2 网络不通
+4. IP 地址填写错误
+
+处理：
+
+在 VM2 上执行：
+
+sudo systemctl status ssh --no-pager
+sudo ss -tlnp | grep ':22'
+
+在 VM1 上执行：
+
+ping -c 4 192.168.45.102
+
+3. auth.log 或 sshd -T 报 sudo 错误
+
+现象：
+
+sudo: a password is required
+sudo: sorry, a password is required to run sudo
+
+原因：
+
+VM2 的 /etc/sudoers.d/ssh_platform_stage4 配置有问题，或者命令路径和 sudoers 中写的不一致。
+
+处理：
+
+在 VM2 上检查：
+
+sudo cat /etc/sudoers.d/ssh_platform_stage4
+sudo visudo -c
+
+切换 testuser 验证：
+
+su - testuser
+sudo -n /usr/bin/tail -n 200 /var/log/auth.log
+sudo -n /usr/sbin/sshd -T
+exit
+
+4. 页面提示命令不在白名单中
+
+这是平台安全机制，不是错误。
+
+说明：
+
+平台后端拒绝执行不在 WHITELIST_COMMANDS 中的命令，避免 Web 平台变成任意命令执行工具。
+
+5. logs 页面暂时没有 Failed password
+
+这不是错误。
+
+原因：
+
+阶段 4 只是平台功能联调，还没有正式进行 VM3 弱口令攻击。阶段 5 攻击实验开始后，auth.log 中会出现大量 Failed password 记录，平台统计功能会更明显。
+
+十四、阶段 4 截图记录
+
+本阶段建议保留以下截图：
+
+1. VM2 sudoers 受限权限配置截图
+   - 证明 testuser 只被允许执行指定检测命令
+
+2. VM2 visudo -c 检查通过截图
+   - 证明 sudoers 配置语法正确
+
+3. VM2 testuser 执行 sudo -n tail auth.log 成功截图
+   - 证明日志读取权限可用
+
+4. VM2 testuser 执行 sudo -n sshd -T 成功截图
+   - 证明安全检查权限可用
+
+5. VM1 项目结构截图
+   - 证明 app.py、commands.html、logs.html、security.html 等文件存在
+
+6. Flask 平台启动截图
+   - 证明 python app.py 正常运行
+
+7. 平台首页截图
+   - 证明阶段 4 平台可访问
+
+8. SSH 连接测试成功截图
+   - 证明平台可通过 Paramiko 连接 VM2
+
+9. 白名单命令下拉框截图
+   - 证明平台未开放任意命令输入
+
+10. whoami 命令执行结果截图
+    - 证明平台可执行普通白名单命令
+
+11. uptime 命令执行结果截图
+    - 证明平台可查看远程主机运行状态
+
+12. systemctl status ssh 执行结果截图
+    - 证明平台可查看 SSH 服务状态
+
+13. tail auth.log 执行结果截图
+    - 证明平台可读取 SSH 认证日志
+
+14. auth.log 日志分析页面截图
+    - 证明平台能展示日志分析结果
+
+15. Accepted password 成功登录记录截图
+    - 证明平台能识别成功登录日志
+
+16. Failed password 统计截图
+    - 如果当前阶段已制造失败记录，则作为失败登录统计证据
+    - 如果未制造，可在阶段 5 攻击实验后补充
+
+17. sshd -T 安全检查表格截图
+    - 证明平台能解析 SSH 安全配置
+
+18. sshd -T 原始输出截图
+    - 证明安全检查结果来源可靠
+
+建议截图目录：
+
+screenshots/04_platform_core/
+├── 01_VM2_sudoers_limited_permission.png
+├── 02_VM2_visudo_check_ok.png
+├── 03_VM2_testuser_sudo_tail_authlog.png
+├── 04_VM2_testuser_sudo_sshd_T.png
+├── 05_VM1_project_structure_stage4.png
+├── 06_VM1_python_app_running_stage4.png
+├── 07_platform_homepage_stage4.png
+├── 08_connect_success.png
+├── 09_command_dropdown_whitelist.png
+├── 10_command_whoami_result.png
+├── 11_command_uptime_result.png
+├── 12_command_ssh_status_result.png
+├── 13_command_auth_log_tail.png
+├── 14_logs_page_authlog_analysis.png
+├── 15_logs_accepted_password.png
+├── 16_logs_failed_password_statistics.png
+├── 17_security_check_table.png
+└── 18_security_sshd_T_raw_output.png
+
+十五、阶段 4 验收结果
+
+阶段 4 完成后，平台应满足以下验收条件：
+
+1. VM2 已为 testuser 配置受限 sudo 权限。
+2. sudoers 配置通过 visudo -c 检查。
+3. testuser 可以免密执行指定的 tail auth.log、systemctl status ssh、sshd -T 命令。
+4. VM1 已备份阶段 3 平台文件。
+5. app.py 已升级为具备 Paramiko SSH 连接能力的后端程序。
+6. 平台可以通过密码认证连接 VM2。
+7. 连接测试页面能显示 whoami 和 hostname 输出。
+8. 平台提供白名单命令下拉框。
+9. 平台不提供任意命令输入框。
+10. 平台可以执行 whoami、hostname、uptime。
+11. 平台可以执行 systemctl status ssh --no-pager。
+12. 平台可以读取 /var/log/auth.log。
+13. 平台可以识别 Accepted password 或 Accepted publickey。
+14. 平台可以统计 Failed password 的来源 IP、失败次数、尝试用户名和最近失败时间。
+15. 平台可以执行 sshd -T。
+16. 平台可以展示 permitrootlogin、passwordauthentication、pubkeyauthentication、permitemptypasswords、maxauthtries、loglevel。
+17. 平台不保存 SSH 密码。
+18. 平台不开放任意命令执行。
+19. 阶段 4 平台功能已能支撑后续弱口令攻击实验和防御验证。
+
+十六、阶段 4 结论
+
+阶段 4 已完成。
+
+当前 VM1 上的 Flask SSH 管理原型平台已经从阶段 3 的占位框架升级为具备核心功能的实验平台。平台能够通过 Paramiko 连接 VM2，执行受控的白名单检测命令，读取并分析 SSH 认证日志，并通过 sshd -T 获取 OpenSSH 最终生效配置。
+
+通过本阶段实现，平台已经具备了后续攻击实验与防御验证所需的基础能力：
+
+1. 后续弱口令攻击发生后，平台可以查看 VM2 的 auth.log。
+2. 平台可以统计 Failed password 来源 IP 和失败次数。
+3. 平台可以识别 Accepted password 成功登录记录。
+4. 平台可以查看 passwordauthentication yes 的防御前状态。
+5. 后续禁用密码登录后，平台可以再次通过 sshd -T 检查 passwordauthentication no。
+6. 后续私钥登录实验中，平台可以识别 Accepted publickey 记录。
+
+因此，阶段 4 的平台核心功能实现与联调工作已经完成，可以进入阶段 5：弱口令暴力破解攻击实验。

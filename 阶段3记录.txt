@@ -1,0 +1,530 @@
+阶段 3：VM1 搭建 Flask SSH 管理平台基础框架记录
+
+一、阶段目标
+
+本阶段目标是在 VM1 管理端上搭建 SSH 管理原型平台的 Flask 基础框架，为后续阶段 4 实现 SSH 连接测试、白名单命令执行、auth.log 日志查看、失败登录统计和 sshd -T 安全配置检查做准备。
+
+本阶段只完成 Web 平台的基础框架、页面路由、前端页面和界面美化，不真正执行 SSH 远程连接操作。Paramiko 的真实连接逻辑将在阶段 4 中实现。
+
+阶段 3 完成后，应满足以下条件：
+
+1. VM1 已安装 Python3、pip、venv。
+2. VM1 已创建 ssh_manage_platform 项目目录。
+3. 已创建 Flask 项目基本结构。
+4. 已安装 flask 和 paramiko 依赖。
+5. 已生成 requirements.txt。
+6. 已实现平台首页、连接测试占位页、白名单命令执行入口、日志查看入口和安全检查入口。
+7. 已完成平台界面美化。
+8. Flask 服务可以监听 0.0.0.0:5000。
+9. 浏览器可以访问 http://192.168.45.101:5000。
+10. 页面能正常提交连接测试表单，但当前只显示阶段 3 占位结果。
+
+二、实验环境
+
+本阶段主要在 VM1 上操作。
+
+1. VM1：SSH-VM1
+   - 角色：管理端
+   - 系统：Ubuntu Desktop
+   - Host-only IP：192.168.45.101
+   - 用途：部署 Flask SSH 管理平台
+
+2. VM2：SSH-VM2
+   - 角色：SSH 目标机 / 被管理端
+   - 系统：Ubuntu Server
+   - Host-only IP：192.168.45.102
+   - 用途：后续由 VM1 平台通过 SSH 管理
+
+3. VM3：SSH-VM3
+   - 角色：攻击端
+   - 系统：Kali Linux
+   - Host-only IP：192.168.45.103
+   - 用途：后续执行弱口令攻击和私钥泄露实验
+
+本阶段平台默认目标主机配置为：
+
+目标 IP：192.168.45.102
+SSH 端口：22
+用户名：testuser
+认证方式：密码认证 / 私钥认证
+实验密码：123456
+
+三、阶段 3 操作过程
+
+1. 在 VM1 上确认网络状态
+
+在 VM1 上执行：
+
+ip -br addr
+ping -c 4 192.168.45.102
+
+目的：
+
+1. 确认 VM1 的 Host-only 地址为 192.168.45.101。
+2. 确认 VM1 能访问 VM2 的 192.168.45.102。
+3. 为后续平台通过 SSH 管理 VM2 做连通性准备。
+
+2. 安装 Python 环境
+
+在 VM1 上执行：
+
+sudo apt update
+sudo apt install python3 python3-pip python3-venv -y
+
+安装完成后检查版本：
+
+python3 --version
+pip3 --version
+
+目的：
+
+1. python3 用于运行 Flask 项目。
+2. python3-pip 用于安装 Flask 和 Paramiko。
+3. python3-venv 用于创建项目虚拟环境，隔离 Python 依赖。
+
+3. 创建 Flask 项目目录
+
+在 VM1 上执行：
+
+mkdir -p ~/ssh_manage_platform
+cd ~/ssh_manage_platform
+
+创建虚拟环境：
+
+python3 -m venv venv
+
+激活虚拟环境：
+
+source venv/bin/activate
+
+激活成功后，终端提示符前应出现：
+
+(venv)
+
+说明当前已进入项目虚拟环境。
+
+4. 安装项目依赖
+
+在虚拟环境中执行：
+
+pip install flask paramiko
+
+安装完成后生成依赖文件：
+
+pip freeze > requirements.txt
+
+查看依赖文件：
+
+cat requirements.txt
+
+requirements.txt 中应包含 Flask 和 paramiko 等相关依赖。
+
+依赖说明：
+
+1. Flask：用于实现 Web 管理平台。
+2. Paramiko：用于后续阶段通过 SSH 连接 VM2。
+3. requirements.txt：用于记录项目依赖，后续提交源码压缩包时一并提交。
+
+5. 创建项目结构
+
+在 ~/ssh_manage_platform 目录下执行：
+
+mkdir -p templates static
+touch app.py README.md
+touch templates/index.html templates/result.html templates/logs.html templates/security.html
+touch static/style.css
+
+查看项目结构：
+
+find . -maxdepth 3 -type f | sort
+
+最终项目结构如下：
+
+ssh_manage_platform/
+├── app.py
+├── README.md
+├── requirements.txt
+├── static/
+│   └── style.css
+└── templates/
+    ├── index.html
+    ├── result.html
+    ├── logs.html
+    └── security.html
+
+四、核心代码文件说明
+
+1. app.py
+
+app.py 是 Flask 后端主程序文件。
+
+本阶段实现了以下路由：
+
+1. /
+   - 平台首页
+   - 显示目标主机连接表单
+   - 默认目标为 192.168.45.102:22
+   - 默认用户名为 testuser
+
+2. /connect
+   - 接收首页连接测试表单
+   - 当前阶段不真正连接 VM2
+   - 只显示“阶段 3 占位页面”
+   - 说明真实 SSH 连接将在阶段 4 使用 Paramiko 实现
+
+3. /commands
+   - 白名单命令执行入口
+   - 当前为占位页面
+   - 后续阶段只允许执行预设命令，不允许任意命令输入
+
+4. /logs
+   - auth.log 日志查看入口
+   - 当前为占位页面
+   - 后续阶段将读取 VM2 的 /var/log/auth.log
+
+5. /security
+   - sshd -T 安全检查入口
+   - 当前为占位页面
+   - 后续阶段将读取 VM2 的最终生效 SSH 配置
+
+app.py 关键设计：
+
+1. 使用 DEFAULT_TARGET 保存默认目标主机信息。
+2. 使用 render_template 渲染 HTML 页面。
+3. Flask 监听 0.0.0.0:5000，便于从 VM1 或宿主机访问。
+4. 阶段 3 不保存密码，不执行真实 SSH 操作。
+
+2. templates/index.html
+
+index.html 是平台首页。
+
+首页包含：
+
+1. 平台标题：SSH 管理原型平台
+2. 目标 IP 输入框
+3. SSH 端口输入框
+4. 用户名输入框
+5. 认证方式选择框
+   - 密码认证
+   - 私钥认证
+6. 密码或私钥路径输入框
+7. 连接测试按钮
+8. 白名单命令执行入口
+9. auth.log 日志查看入口
+10. sshd -T 安全检查入口
+11. 实验环境概览
+12. 平台安全边界说明
+
+3. templates/result.html
+
+result.html 是连接测试和功能占位结果页。
+
+当前阶段用于显示：
+
+1. 阶段 3 占位状态
+2. 表单提交结果
+3. 用户输入的目标 IP、端口、用户名、认证方式
+4. 返回首页按钮
+
+该页面证明 Flask 表单提交和后端路由已经正常工作。
+
+4. templates/logs.html
+
+logs.html 是 auth.log 日志查看占位页面。
+
+页面设计中预留了：
+
+1. Failed password 分析说明
+2. Accepted password 分析说明
+3. Accepted publickey 分析说明
+4. invalid user 分析说明
+5. 失败登录统计表结构
+
+后续阶段 4 将通过 SSH 读取 VM2 的 /var/log/auth.log，并解析失败登录来源 IP、失败次数、尝试用户名和最近失败时间。
+
+5. templates/security.html
+
+security.html 是 SSH 安全配置检查占位页面。
+
+页面设计中预留了以下检查项：
+
+1. permitrootlogin
+2. passwordauthentication
+3. pubkeyauthentication
+4. permitemptypasswords
+5. maxauthtries
+6. loglevel
+
+后续阶段 4 将通过 SSH 在 VM2 上执行 sshd -T，并将这些配置项解析后展示在页面表格中。
+
+6. static/style.css
+
+style.css 是平台样式文件。
+
+最初版本较简单，后续根据界面效果进行了美化。美化后的页面采用：
+
+1. 深色顶部标题栏
+2. 卡片化布局
+3. 表单双列布局
+4. 圆角输入框
+5. 蓝色主按钮
+6. 模块化功能入口
+7. 表格美化
+8. 响应式布局
+9. 平台环境概览区
+10. 页脚安全提示
+
+五、界面美化调整
+
+阶段 3 中，在平台基础页面搭建完成后，对界面进行了美化。
+
+主要修改文件：
+
+1. static/style.css
+2. templates/index.html
+3. templates/result.html
+
+美化后的首页包含：
+
+1. 顶部深色标题区域
+2. “阶段 3：平台基础框架”标签
+3. 左侧连接测试表单
+4. 右侧功能模块入口
+5. 实验环境概览卡片
+6. 安全边界提示
+
+美化目的：
+
+1. 提高平台页面观感。
+2. 使截图更适合放入实验报告。
+3. 让平台看起来更接近 SSH 管理原型平台，而不是简单表单页面。
+4. 不影响后续阶段 4 的功能接入。
+
+六、启动 Flask 平台
+
+在 VM1 项目目录中执行：
+
+cd ~/ssh_manage_platform
+source venv/bin/activate
+python app.py
+
+正常运行时，终端应显示类似：
+
+* Serving Flask app 'app'
+* Debug mode: on
+* Running on all addresses (0.0.0.0)
+* Running on http://127.0.0.1:5000
+* Running on http://192.168.45.101:5000
+
+说明 Flask 服务已经启动，并监听 5000 端口。
+
+七、浏览器访问验证
+
+在 VM1 浏览器中访问：
+
+http://127.0.0.1:5000
+
+或：
+
+http://192.168.45.101:5000
+
+如果从宿主机浏览器访问，也可尝试：
+
+http://192.168.45.101:5000
+
+平台首页应正常显示，包含：
+
+1. SSH 管理原型平台标题
+2. 目标 IP：192.168.45.102
+3. SSH 端口：22
+4. 用户名：testuser
+5. 认证方式选择
+6. 密码或私钥路径输入框
+7. 执行连接测试按钮
+8. 白名单命令执行入口
+9. auth.log 日志查看入口
+10. sshd -T 安全检查入口
+11. 实验环境概览
+
+八、连接测试表单验证
+
+在平台首页保持默认参数：
+
+目标 IP：192.168.45.102
+SSH 端口：22
+用户名：testuser
+认证方式：密码认证
+密码：123456
+
+点击：
+
+执行连接测试
+
+阶段 3 的预期结果不是“真实 SSH 连接成功”，而是显示占位结果：
+
+阶段 3 占位页面
+Flask 基础框架已接收到表单数据。真正的 SSH 连接将在阶段 4 使用 Paramiko 实现。
+
+该结果说明：
+
+1. 首页表单能够提交。
+2. /connect 路由能够接收 POST 请求。
+3. Flask 后端能够读取表单中的目标 IP、端口、用户名和认证方式。
+4. result.html 能够正确渲染结果。
+5. 阶段 4 可以在此基础上接入 Paramiko 真实连接逻辑。
+
+九、功能入口验证
+
+依次访问以下页面：
+
+http://192.168.45.101:5000/
+http://192.168.45.101:5000/commands
+http://192.168.45.101:5000/logs
+http://192.168.45.101:5000/security
+
+验证结果：
+
+1. 首页可以正常访问。
+2. 白名单命令执行入口可以打开。
+3. auth.log 日志查看页面可以打开。
+4. sshd -T 安全检查页面可以打开。
+5. 各页面可以返回首页。
+6. 页面没有出现 Flask 报错。
+
+十、排错记录与注意事项
+
+1. 如果浏览器打不开平台
+
+先确认 Flask 是否仍在运行：
+
+cd ~/ssh_manage_platform
+source venv/bin/activate
+python app.py
+
+2. 检查 5000 端口是否监听
+
+ss -tlnp | grep ':5000'
+
+正常应看到 0.0.0.0:5000 正在监听。
+
+3. 本机测试
+
+curl http://127.0.0.1:5000
+
+如果返回 HTML，说明 Flask 服务本身正常。
+
+4. 如果宿主机打不开
+
+检查 VM1 防火墙：
+
+sudo ufw status
+
+如果 UFW 为 active，可允许 5000 端口：
+
+sudo ufw allow 5000/tcp
+sudo ufw reload
+
+十一、阶段 3 截图记录
+
+本阶段建议保留以下截图：
+
+1. VM1 的 ip -br addr 和 ping VM2 成功截图
+   - 证明 VM1 网络正常，能够访问 VM2
+
+2. Python 环境安装截图
+   - 证明 python3、pip、venv 已安装
+
+3. 创建项目目录和虚拟环境截图
+   - 证明 ssh_manage_platform 项目已创建
+
+4. pip install flask paramiko 截图
+   - 证明 Flask 和 Paramiko 已安装
+
+5. requirements.txt 截图
+   - 证明依赖文件已生成
+
+6. 项目目录结构截图
+   - 证明 app.py、templates、static 等文件结构完整
+
+7. app.py 代码截图
+   - 证明 Flask 后端基础路由已编写
+
+8. static/style.css 美化代码截图
+   - 证明平台界面已美化
+
+9. python app.py 启动截图
+   - 证明 Flask 服务正常运行
+
+10. 浏览器访问首页截图
+    - 证明平台首页可访问
+
+11. 连接测试占位结果截图
+    - 证明表单提交和路由处理正常
+
+12. 白名单命令执行占位页面截图
+    - 证明功能入口可访问
+
+13. auth.log 日志查看占位页面截图
+    - 证明日志页面可访问
+
+14. sshd -T 安全检查占位页面截图
+    - 证明安全检查页面可访问
+
+建议截图目录：
+
+screenshots/03_platform/
+├── 01_VM1_ip_and_ping_VM2.png
+├── 02_install_python_env.png
+├── 03_create_project_and_venv.png
+├── 04_pip_install_flask_paramiko.png
+├── 05_requirements_txt.png
+├── 06_project_structure.png
+├── 07_app_py_code.png
+├── 08_style_css_beautified.png
+├── 09_python_app_running.png
+├── 10_browser_homepage_beautified.png
+├── 11_connect_form_placeholder_result_beautified.png
+├── 12_commands_placeholder_beautified.png
+├── 13_logs_placeholder_beautified.png
+└── 14_security_placeholder_beautified.png
+
+十二、阶段 3 验收结果
+
+阶段 3 已完成，当前实验平台满足以下条件：
+
+1. VM1 已安装 Python3、pip、venv。
+2. VM1 已创建 ssh_manage_platform 项目目录。
+3. 已创建 Python 虚拟环境 venv。
+4. 已安装 flask 和 paramiko。
+5. 已生成 requirements.txt。
+6. 已创建 app.py。
+7. 已创建 templates/index.html。
+8. 已创建 templates/result.html。
+9. 已创建 templates/logs.html。
+10. 已创建 templates/security.html。
+11. 已创建 static/style.css。
+12. 已创建 README.md。
+13. app.py 中已实现 /、/connect、/commands、/logs、/security 路由。
+14. 首页已显示目标主机连接表单。
+15. 首页已显示白名单命令执行、auth.log 日志查看、sshd -T 安全检查入口。
+16. 页面已完成初步美化。
+17. Flask 服务可以通过 python app.py 启动。
+18. 平台可以通过 http://192.168.45.101:5000 访问。
+19. 连接测试表单可以提交并显示阶段 3 占位结果。
+20. 各功能入口页面可以正常打开。
+
+十三、阶段 3 结论
+
+阶段 3 已完成。
+
+当前 VM1 已成功搭建 Flask SSH 管理原型平台的基础框架。平台已经具备 Web 页面、路由结构、项目目录结构和基础 UI，能够作为后续 SSH 管理功能的承载平台。
+
+本阶段尚未真正执行 SSH 远程连接操作，所有功能页面均为框架或占位页面。阶段 4 将在此基础上使用 Paramiko 实现核心功能，包括：
+
+1. SSH 连接测试。
+2. 白名单命令执行。
+3. auth.log 日志查看。
+4. Failed password 失败登录统计。
+5. sshd -T 安全配置检查。
+
+因此，阶段 3 的 Flask 平台基础框架搭建工作已经完成，可以进入阶段 4：实现平台核心功能并联调。

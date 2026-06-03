@@ -1,0 +1,550 @@
+阶段 5：弱口令暴力破解攻击实验记录
+
+一、阶段目标
+
+本阶段目标是验证 SSH 弱口令风险：当 VM2 SSH 目标机开启密码认证，且 testuser 使用弱口令 123456 时，VM3 攻击端可以通过用户名字典和密码字典进行 SSH 登录尝试，最终猜中正确密码并获得登录权限。
+
+本阶段重点证明以下内容：
+
+1. VM2 的 SSH 服务正常运行。
+2. VM2 的 PasswordAuthentication 当前为 yes。
+3. VM2 当前未受到 Fail2ban 防护影响。
+4. VM3 可以访问 VM2 的 22 端口。
+5. VM3 使用弱口令实验脚本进行 SSH 登录尝试。
+6. 攻击脚本成功命中 testuser / 123456。
+7. VM2 的 auth.log 中记录了多条 Failed password。
+8. VM2 的 auth.log 中记录了 Accepted password for testuser from 192.168.45.103。
+9. VM1 管理平台可以读取 VM2 的 auth.log，并显示攻击相关日志。
+10. 平台日志解析功能经过修正后，能够识别 ISO 时间格式日志并生成 Failed password 统计表和成功登录记录。
+
+二、实验环境
+
+本阶段继续使用前面已搭建好的三台虚拟机。
+
+1. VM1：SSH-VM1
+   - 角色：管理端
+   - 系统：Ubuntu Desktop
+   - Host-only IP：192.168.45.101
+   - 用途：运行 Flask SSH 管理平台，读取 VM2 的认证日志并展示攻击结果
+
+2. VM2：SSH-VM2
+   - 角色：SSH 目标机 / 被管理端
+   - 系统：Ubuntu Server
+   - Host-only IP：192.168.45.102
+   - 用途：运行 OpenSSH Server，保存 /var/log/auth.log，作为攻击实验目标
+
+3. VM3：SSH-VM3
+   - 角色：攻击端
+   - 系统：Kali Linux
+   - Host-only IP：192.168.45.103
+   - 用途：执行 SSH 弱口令字典尝试脚本
+
+本阶段实验账号：
+
+用户名：testuser
+弱口令：123456
+
+三、攻击前状态确认
+
+1. VM2 确认 SSH 服务运行
+
+在 VM2 上执行：
+
+systemctl status ssh --no-pager
+
+验证结果显示：
+
+Active: active (running)
+
+说明 VM2 的 OpenSSH 服务处于正常运行状态。
+
+2. VM2 确认 22 端口监听
+
+由于 testuser 没有完整 sudo 权限，因此不使用 sudo ss -tlnp，而是直接执行：
+
+ss -tln | grep ':22'
+
+该命令只查看监听端口，不显示进程信息，不需要 sudo 权限。
+
+预期结果显示 22 端口处于 LISTEN 状态，说明 VM2 的 SSH 服务正在监听 TCP 22 端口。
+
+3. VM2 确认密码认证开启
+
+在 VM2 上执行：
+
+sudo -n /usr/sbin/sshd -T | grep -E '^(passwordauthentication|permitrootlogin|pubkeyauthentication|loglevel)'
+
+预期结果包括：
+
+passwordauthentication yes
+permitrootlogin no
+pubkeyauthentication yes
+loglevel VERBOSE
+
+其中 passwordauthentication yes 是阶段 5 弱口令攻击实验的必要前提。如果此项为 no，则攻击脚本无法通过密码认证成功登录。
+
+4. VM2 确认 Fail2ban 没有干扰
+
+在 VM2 上执行：
+
+systemctl status fail2ban --no-pager
+
+如果结果为：
+
+Unit fail2ban.service could not be found.
+
+说明 Fail2ban 尚未安装，不会影响阶段 5。
+
+如果结果为 inactive，说明 Fail2ban 未运行，也不会影响阶段 5。
+
+如果结果为 active，需要先使用管理员账号停止 Fail2ban：
+
+sudo systemctl stop fail2ban
+systemctl status fail2ban --no-pager
+
+阶段 5 不启用 Fail2ban，因为本阶段重点是验证弱口令风险；Fail2ban 防御验证放到阶段 6。
+
+5. VM2 记录攻击前日志
+
+在 VM2 上执行：
+
+sudo -n /usr/bin/tail -n 100 /var/log/auth.log
+
+该命令能够成功执行，说明阶段 4 配置的受限 sudo 权限可以用于读取 auth.log。
+
+注意：曾尝试执行以下命令：
+
+sudo -n /usr/bin/tail -n 50 /var/log/auth.log
+
+系统提示：
+
+sudo: a password is required
+
+原因是 sudoers 对命令参数匹配严格，阶段 4 中允许的是：
+
+/usr/bin/tail -n 100 /var/log/auth.log
+/usr/bin/tail -n 200 /var/log/auth.log
+
+而 -n 50 不在允许列表中。因此阶段 5 中统一使用 -n 100 或 -n 200 的形式查看日志。
+
+四、VM3 攻击端环境准备
+
+1. VM3 确认网络地址
+
+在 VM3 上执行：
+
+ip -br addr
+
+确认 VM3 的 Host-only 地址为：
+
+192.168.45.103
+
+2. VM3 测试到 VM2 的连通性
+
+在 VM3 上执行：
+
+ping -c 4 192.168.45.102
+
+验证结果显示 0% packet loss，说明 VM3 可以访问 VM2。
+
+3. VM3 测试 VM2 的 SSH 端口
+
+在 VM3 上安装 netcat 和 Paramiko：
+
+sudo apt update
+sudo apt install netcat-openbsd python3-paramiko -y
+
+测试 VM2 的 22 端口：
+
+nc -vz 192.168.45.102 22
+
+预期结果为：
+
+Connection to 192.168.45.102 22 port [tcp/ssh] succeeded!
+
+说明 VM3 可以访问 VM2 的 SSH 服务端口。
+
+4. VM3 验证 Paramiko
+
+在 VM3 上执行：
+
+python3 -c "import paramiko; print(paramiko.__version__)"
+
+能够输出 Paramiko 版本号，说明 Python SSH 库安装成功。
+
+五、VM3 创建攻击目录和字典
+
+1. 创建攻击目录
+
+在 VM3 上执行：
+
+mkdir -p ~/ssh_attack
+cd ~/ssh_attack
+
+2. 创建用户名字典
+
+在 VM3 上执行：
+
+cat > users.txt << 'EOF_INNER'
+root
+admin
+testuser
+EOF_INNER
+
+3. 创建密码字典
+
+在 VM3 上执行：
+
+cat > passwords.txt << 'EOF_INNER'
+admin
+password
+Password123
+123456
+EOF_INNER
+
+说明：
+
+1. 正确密码为 123456。
+2. 将 123456 放在密码字典最后，可以使攻击过程中先产生多条 Failed password 记录，再产生 Accepted password 成功记录。
+
+4. 查看字典内容
+
+执行：
+
+echo "=== users.txt ==="
+cat users.txt
+
+echo "=== passwords.txt ==="
+cat passwords.txt
+
+确认字典内容如下：
+
+users.txt：
+root
+admin
+testuser
+
+passwords.txt：
+admin
+password
+Password123
+123456
+
+六、VM3 编写弱口令实验脚本
+
+在 VM3 的 ~/ssh_attack 目录下创建脚本：
+
+nano ssh_bruteforce.py
+
+脚本功能说明：
+
+1. 读取 users.txt 中的用户名。
+2. 读取 passwords.txt 中的密码。
+3. 使用 Paramiko 逐个尝试 SSH 登录。
+4. 目标为 192.168.45.102:22。
+5. 禁用本机 key 和 agent，以确保使用密码认证。
+6. 每次尝试之间设置 0.8 秒间隔。
+7. 登录成功后执行 whoami && hostname。
+8. 成功后输出命中的用户名和密码。
+9. 仅用于本地隔离实验网络，不对未授权目标使用。
+
+脚本核心配置：
+
+TARGET_HOST = "192.168.45.102"
+TARGET_PORT = 22
+USER_FILE = "users.txt"
+PASSWORD_FILE = "passwords.txt"
+DELAY_SECONDS = 0.8
+
+脚本执行前赋予权限：
+
+chmod +x ssh_bruteforce.py
+
+七、VM3 执行弱口令攻击实验
+
+在 VM3 上执行：
+
+cd ~/ssh_attack
+python3 ssh_bruteforce.py
+
+脚本逐项尝试 users.txt 和 passwords.txt 中的组合。
+
+预期过程：
+
+1. 尝试 root / admin，认证失败。
+2. 尝试 root / password，认证失败。
+3. 尝试 root / Password123，认证失败。
+4. 尝试 root / 123456，认证失败。
+5. 尝试 admin 相关组合，认证失败。
+6. 尝试 testuser 相关组合。
+7. 最终命中 testuser / 123456。
+
+攻击成功时，脚本输出类似：
+
+[+] 成功登录：testuser / 123456
+[+] 远程命令输出：
+testuser
+ubuntu-server
+
+其中 ubuntu-server 为 VM2 的主机名，以实际输出为准。
+
+该结果说明：攻击端 VM3 通过字典尝试成功获得 VM2 的 testuser SSH 登录权限。
+
+八、VM2 查看 auth.log 攻击证据
+
+攻击成功后，回到 VM2，执行：
+
+sudo -n /usr/bin/tail -n 100 /var/log/auth.log | grep -E 'Failed password|Accepted password'
+
+如果日志较多，也可以执行：
+
+sudo -n /usr/bin/tail -n 100 /var/log/auth.log | grep -E 'Failed password|Accepted password' | tail -n 60
+
+在日志中观察到来自 VM3 的失败记录，例如：
+
+Failed password for root from 192.168.45.103
+Failed password for invalid user admin from 192.168.45.103
+Failed password for testuser from 192.168.45.103
+
+同时观察到最终成功记录：
+
+Accepted password for testuser from 192.168.45.103
+
+这说明攻击过程已经被 VM2 的 auth.log 记录下来，日志证据完整。
+
+九、VM1 平台查看攻击日志
+
+1. 启动 VM1 Flask 平台
+
+在 VM1 上执行：
+
+cd ~/ssh_manage_platform
+source venv/bin/activate
+python app.py
+
+浏览器访问：
+
+http://192.168.45.101:5000/logs
+
+2. 平台填写连接信息
+
+在日志查看页面填写：
+
+目标 IP：192.168.45.102
+SSH 端口：22
+用户名：testuser
+认证方式：密码认证
+密码：123456
+
+点击：
+
+读取并分析 auth.log
+
+3. 平台读取结果
+
+平台成功读取 VM2 的 auth.log，并在“关键原始日志”区域显示了阶段 5 的攻击相关日志。
+
+页面中可以看到：
+
+Failed password for root from 192.168.45.103
+Failed password for invalid user admin from 192.168.45.103
+Failed password for testuser from 192.168.45.103
+Accepted password for testuser from 192.168.45.103
+
+说明 VM1 管理平台能够读取 VM2 的认证日志，并能够显示弱口令攻击过程中的失败和成功认证记录。
+
+十、平台日志解析问题与修复
+
+1. 问题现象
+
+在 VM1 平台 /logs 页面中，已经能看到“关键原始日志”，但最初没有显示 Failed password 统计表和成功登录记录表。
+
+2. 原因分析
+
+VM2 当前 auth.log 的时间格式为 ISO 格式，例如：
+
+2026-06-02T13:39:30.064573+00:00
+
+而阶段 4 初始版本的 parse_auth_log() 正则主要匹配传统 syslog 时间格式，例如：
+
+Jun 02 13:39:30
+
+因此平台能够通过关键字筛出原始日志，但没有正确解析为统计表。
+
+3. 修复方法
+
+在 VM1 的 app.py 中修改 parse_auth_log() 函数，使其同时兼容两种时间格式：
+
+1. 传统 syslog 时间格式：
+   Jun 02 13:39:30
+
+2. ISO 时间格式：
+   2026-06-02T13:39:30.064573+00:00
+
+修复后的 time_pattern 为：
+
+time_pattern = r"(?P<time>(?:\\w+\\s+\\d+\\s+\\d+:\\d+:\\d+)|(?:\\d{4}-\\d{2}-\\d{2}T\\S+))"
+
+修复后，failed_re 和 accepted_re 均使用该 time_pattern 进行匹配。
+
+4. 重启 Flask 平台
+
+修改 app.py 后，在 VM1 上重启 Flask：
+
+Ctrl + C
+
+cd ~/ssh_manage_platform
+source venv/bin/activate
+python app.py
+
+重新访问：
+
+http://192.168.45.101:5000/logs
+
+重新填写：
+
+目标 IP：192.168.45.102
+SSH 端口：22
+用户名：testuser
+认证方式：密码认证
+密码：123456
+
+点击：
+
+读取并分析 auth.log
+
+5. 修复后预期结果
+
+修复后，平台应能显示：
+
+Failed password 统计表：
+
+来源 IP：192.168.45.103
+失败次数：多次
+尝试用户名：admin, root, testuser
+最近失败时间：实际日志时间
+判断：疑似暴力破解
+
+成功登录记录：
+
+认证方式：password
+用户：testuser
+来源 IP：192.168.45.103
+
+该修复说明平台能够适配 Ubuntu 当前 auth.log 的实际日志格式，提升日志分析功能的准确性。
+
+十一、阶段 5 截图记录
+
+本阶段建议保留以下截图：
+
+1. VM2 SSH 服务 active 状态截图
+   - 证明 SSH 服务正常运行
+
+2. VM2 22 端口监听截图
+   - 使用 ss -tln | grep ':22'
+   - 证明 SSH 服务端口可访问
+
+3. VM2 passwordauthentication yes 截图
+   - 证明当前允许密码认证
+
+4. VM2 Fail2ban 未安装、未运行或已停止截图
+   - 证明阶段 5 不受 Fail2ban 干扰
+
+5. VM2 攻击前 auth.log 截图
+   - 证明攻击前日志状态
+
+6. VM3 ping VM2 成功截图
+   - 证明攻击端可以访问目标机
+
+7. VM3 nc 测试 22 端口成功截图
+   - 证明 SSH 端口可连接
+
+8. VM3 Paramiko 安装或版本验证截图
+   - 证明攻击脚本运行环境已准备
+
+9. VM3 users.txt 和 passwords.txt 截图
+   - 证明攻击输入字典
+
+10. VM3 ssh_bruteforce.py 代码截图
+    - 证明攻击脚本实现
+
+11. VM3 攻击脚本成功命中 testuser / 123456 截图
+    - 证明弱口令被猜中
+
+12. VM2 auth.log 中 Failed password 截图
+    - 证明攻击过程中产生失败认证记录
+
+13. VM2 auth.log 中 Accepted password 截图
+    - 证明攻击最终成功登录
+
+14. VM1 平台关键原始日志截图
+    - 证明平台能够读取 VM2 的 auth.log
+
+15. VM1 平台 Failed password 统计表截图
+    - 修复日志解析后，证明平台能够统计攻击来源 IP 和失败次数
+
+16. VM1 平台成功登录记录截图
+    - 修复日志解析后，证明平台能够识别 Accepted password
+
+建议截图目录：
+
+screenshots/05_bruteforce/
+├── 01_VM2_ssh_active.png
+├── 02_VM2_ssh_22_listen.png
+├── 03_VM2_passwordauthentication_yes.png
+├── 04_VM2_fail2ban_stopped_or_not_installed.png
+├── 05_VM2_auth_log_before_attack.png
+├── 06_VM3_ping_and_nc_VM2_22.png
+├── 07_VM3_paramiko_installed.png
+├── 08_VM3_users_passwords_dict.png
+├── 09_VM3_attack_script_code.png
+├── 10_VM3_attack_success_testuser_123456.png
+├── 11_VM2_auth_log_failed_password.png
+├── 12_VM2_auth_log_accepted_password.png
+├── 13_VM1_platform_raw_attack_log.png
+├── 14_VM1_platform_failed_password_statistics.png
+└── 15_VM1_platform_accepted_password_record.png
+
+十二、阶段 5 验收结果
+
+阶段 5 完成后，应满足以下验收条件：
+
+1. VM2 的 SSH 服务处于 active (running) 状态。
+2. VM2 的 22 端口处于监听状态。
+3. VM2 的 passwordauthentication 为 yes。
+4. Fail2ban 未安装、未运行或已停止，不影响弱口令攻击实验。
+5. VM3 可以 ping 通 VM2。
+6. VM3 可以访问 VM2 的 22 端口。
+7. VM3 已安装 python3-paramiko。
+8. VM3 已创建 users.txt 和 passwords.txt。
+9. 密码字典中包含正确弱口令 123456。
+10. VM3 攻击脚本成功输出 testuser / 123456。
+11. VM2 auth.log 中出现来自 192.168.45.103 的 Failed password。
+12. VM2 auth.log 中出现 Accepted password for testuser from 192.168.45.103。
+13. VM1 平台 /logs 页面可以读取 VM2 的 auth.log。
+14. VM1 平台可以展示攻击相关关键原始日志。
+15. 修复日志解析函数后，VM1 平台可以统计 Failed password。
+16. 修复日志解析函数后，VM1 平台可以识别 Accepted password 成功登录记录。
+
+十三、阶段 5 实验结论
+
+本阶段验证了 SSH 弱口令暴力破解风险。
+
+在 VM2 开启 PasswordAuthentication yes，且 testuser 使用弱口令 123456 的条件下，VM3 攻击端通过用户名字典和密码字典进行 SSH 登录尝试。攻击过程中，系统记录了多个来自 192.168.45.103 的 Failed password 日志；当脚本尝试到 testuser / 123456 时，登录成功，VM2 的 auth.log 中记录了 Accepted password for testuser from 192.168.45.103。
+
+VM1 管理平台能够读取 VM2 的 auth.log，并展示攻击相关关键原始日志。由于 VM2 的 auth.log 使用 ISO 时间格式，最初平台统计表未能正确解析日志；修正 parse_auth_log() 函数后，平台能够正确识别 Failed password 和 Accepted password，并生成攻击来源 IP、失败次数、尝试用户名和成功登录记录。
+
+实验说明：当 SSH 服务允许密码认证，且系统中存在弱口令用户时，攻击者可以通过字典猜测获得远程登录权限。因此后续需要通过 Fail2ban、禁用密码登录、密钥认证和密钥轮换等措施降低风险。
+
+十四、下一阶段计划
+
+阶段 5 完成后，进入阶段 6：Fail2ban 防御验证。
+
+阶段 6 的目标是：
+
+1. 在 VM2 上安装并启用 Fail2ban。
+2. 配置 sshd jail。
+3. 让 VM3 使用错误密码持续尝试登录。
+4. 验证 VM2 自动封禁 VM3 的 IP：192.168.45.103。
+5. 在 VM1 平台中查看失败登录统计。
+6. 实验结束后解除 VM3 的封禁，避免影响后续私钥泄露与密钥轮换实验。

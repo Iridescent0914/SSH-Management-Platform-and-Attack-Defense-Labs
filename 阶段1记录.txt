@@ -1,0 +1,271 @@
+阶段 1：VM2 搭建 OpenSSH 服务记录
+
+一、阶段目标
+
+本阶段目标是在 VM2 目标机上安装并启动 OpenSSH Server，创建实验用户 testuser，并从 VM1 管理端通过 SSH 密码认证登录 VM2，验证 SSH 服务、22 端口监听、远程登录和认证日志记录均正常。
+
+本阶段只完成 SSH 基础服务搭建，不进行弱口令攻击实验，不启用 Fail2ban，也不禁用密码登录。这些内容留到后续阶段完成。
+
+二、实验环境
+
+本阶段沿用阶段 0 已完成的实验环境：
+
+1. VM1：SSH-VM1
+   - 系统：Ubuntu Desktop
+   - 角色：管理端
+   - Host-only IP：192.168.45.101
+   - 用途：通过 SSH 连接并管理 VM2
+
+2. VM2：SSH-VM2
+   - 系统：Ubuntu Server
+   - 角色：SSH 目标机 / 被管理端
+   - Host-only IP：192.168.45.102
+   - 用途：运行 OpenSSH Server，保存 SSH 认证日志 auth.log
+
+3. VM3：SSH-VM3
+   - 系统：Kali Linux
+   - 角色：攻击端
+   - Host-only IP：192.168.45.103
+   - 用途：后续阶段执行 SSH 弱口令攻击和私钥泄露模拟
+
+本阶段主要操作对象为 VM2，验证端为 VM1。
+
+三、安装 OpenSSH Server
+
+在 VM2 上首先更新软件源：
+
+sudo apt update
+
+然后安装 OpenSSH Server：
+
+sudo apt install openssh-server -y
+
+安装完成后，可通过以下命令确认 openssh-server 软件包已安装：
+
+dpkg -l | grep openssh-server
+
+验证结果显示 openssh-server 已安装，说明 VM2 已具备运行 SSH 服务端的基础条件。
+
+四、启动 SSH 服务并设置开机自启
+
+在 VM2 上启动 SSH 服务并设置为开机自启：
+
+sudo systemctl enable ssh
+sudo systemctl start ssh
+
+也可以使用：
+
+sudo systemctl enable --now ssh
+
+随后查看 SSH 服务状态：
+
+sudo systemctl status ssh --no-pager
+
+验证结果显示：
+
+Active: active (running)
+
+说明 VM2 上的 SSH 服务已经正常启动并处于运行状态。
+
+五、确认 22 端口监听
+
+在 VM2 上执行以下命令查看 SSH 服务端口监听情况：
+
+sudo ss -tlnp | grep ':22'
+
+验证结果显示 sshd 正在监听 TCP 22 端口，通常包括以下监听地址：
+
+0.0.0.0:22
+[::]:22
+
+这说明 VM2 的 SSH 服务已经可以接收来自实验网络中的 SSH 连接请求。
+
+六、检查防火墙状态
+
+为避免 VM1 无法连接 VM2，检查 VM2 的 UFW 防火墙状态：
+
+sudo ufw status
+
+如果显示：
+
+Status: inactive
+
+说明防火墙未启用，不会阻止 SSH 连接。
+
+如果显示：
+
+Status: active
+
+则需要允许 SSH 端口：
+
+sudo ufw allow 22/tcp
+sudo ufw reload
+sudo ufw status
+
+本阶段确认 SSH 连接未被防火墙阻断。
+
+七、创建实验用户 testuser
+
+在 VM2 上创建实验用户：
+
+sudo adduser testuser
+
+按照提示设置密码。本实验中设置实验弱口令为：
+
+123456
+
+创建过程中，Full Name、Room Number、Work Phone、Home Phone、Other 等信息可以直接按 Enter 使用默认空值，最后输入 Y 确认。
+
+创建完成后，使用以下命令确认用户存在：
+
+id testuser
+
+验证结果显示 testuser 用户已创建，并具有独立的 uid 和 gid。
+
+也可以通过以下命令确认 /etc/passwd 中存在该用户：
+
+grep '^testuser:' /etc/passwd
+
+验证结果显示 testuser 的家目录为 /home/testuser，默认 shell 为 /bin/bash。
+
+八、本地验证 testuser 用户
+
+为确认 testuser 密码和 shell 配置正常，在 VM2 上执行：
+
+su - testuser
+
+输入密码：
+
+123456
+
+成功切换后执行：
+
+whoami
+pwd
+
+验证结果显示：
+
+whoami 输出 testuser
+pwd 输出 /home/testuser
+
+说明 testuser 本地登录环境正常。
+
+完成验证后退出 testuser：
+
+exit
+
+九、从 VM1 远程登录 VM2
+
+切换到 VM1 管理端，先确认 VM1 到 VM2 的网络连通性：
+
+ping -c 4 192.168.45.102
+
+验证结果显示 4 packets transmitted, 4 received, 0% packet loss，说明 VM1 可以访问 VM2。
+
+随后从 VM1 执行 SSH 登录：
+
+ssh testuser@192.168.45.102
+
+首次连接时，SSH 客户端提示确认主机指纹，输入：
+
+yes
+
+然后输入 testuser 的密码：
+
+123456
+
+登录成功后，在 SSH 会话中执行：
+
+whoami
+hostname
+ip -br addr
+
+验证结果显示：
+
+1. whoami 输出 testuser
+2. hostname 显示 VM2 主机名
+3. ip -br addr 中可以看到 VM2 的 Host-only 地址 192.168.45.102/24
+
+这说明 VM1 已经能够通过 SSH 密码认证成功登录 VM2。
+
+完成验证后退出 SSH 会话：
+
+exit
+
+十、查看 VM2 的 SSH 认证日志
+
+切回 VM2，查看 SSH 认证日志：
+
+sudo tail -n 50 /var/log/auth.log
+
+或筛选成功登录记录：
+
+sudo grep 'Accepted password' /var/log/auth.log | tail -n 20
+
+验证结果中出现类似记录：
+
+Accepted password for testuser from 192.168.45.101 port xxxxx ssh2
+pam_unix(sshd:session): session opened for user testuser
+pam_unix(sshd:session): session closed for user testuser
+
+其中关键记录为：
+
+Accepted password for testuser from 192.168.45.101
+
+该日志证明 VM1 管理端通过密码认证成功登录 VM2，并且 VM2 的 auth.log 可以正常记录 SSH 认证事件。
+
+十一、本阶段截图记录
+
+本阶段建议保留以下截图作为报告证据：
+
+1. VM2 安装 openssh-server 截图
+   - 证明 OpenSSH Server 已安装
+
+2. VM2 执行 systemctl status ssh 截图
+   - 证明 SSH 服务处于 active running 状态
+
+3. VM2 执行 ss -tlnp | grep ':22' 截图
+   - 证明 TCP 22 端口正在监听
+
+4. VM2 执行 id testuser 或 grep '^testuser:' /etc/passwd 截图
+   - 证明实验用户 testuser 已创建
+
+5. VM1 执行 ssh testuser@192.168.45.102 登录成功截图
+   - 证明管理端可以通过 SSH 远程登录目标机
+
+6. VM1 登录 VM2 后执行 whoami、hostname、ip -br addr 的截图
+   - 证明当前远程会话用户为 testuser，目标机为 VM2
+
+7. VM2 查看 /var/log/auth.log 中 Accepted password 记录截图
+   - 证明 SSH 成功登录事件被系统日志记录
+
+建议截图目录：
+
+screenshots/02_ssh_setup/
+├── 01_VM2_install_openssh_server.png
+├── 02_VM2_systemctl_status_ssh.png
+├── 03_VM2_ss_22_listen.png
+├── 04_VM2_id_testuser.png
+├── 05_VM1_ssh_login_VM2_success.png
+├── 06_VM1_remote_whoami_hostname_ip.png
+└── 07_VM2_auth_log_accepted_password.png
+
+十二、阶段 1 验收结果
+
+阶段 1 已完成，当前实验状态满足以下条件：
+
+1. VM2 已安装 OpenSSH Server。
+2. VM2 的 SSH 服务已启动并设置为开机自启。
+3. systemctl status ssh 显示 SSH 服务为 active running。
+4. VM2 的 TCP 22 端口正在监听。
+5. VM2 已创建实验账号 testuser。
+6. testuser 的实验密码设置为 123456。
+7. VM1 可以通过 ssh testuser@192.168.45.102 成功登录 VM2。
+8. VM2 的 /var/log/auth.log 中出现 Accepted password for testuser from 192.168.45.101 日志。
+9. SSH 服务、远程登录和认证日志记录均已验证正常。
+
+十三、阶段 1 结论
+
+通过本阶段操作，VM2 已成功搭建基础 OpenSSH 服务，并创建了后续实验所需的 testuser 实验账号。VM1 管理端已经能够通过密码认证方式远程登录 VM2，VM2 也能够在 /var/log/auth.log 中记录 SSH 登录行为。
+
+因此，阶段 1 已完成，可以进入阶段 2：配置 VM2 的 SSH 基础安全参数，包括 PermitRootLogin、PasswordAuthentication、PubkeyAuthentication、PermitEmptyPasswords、MaxAuthTries 和 LogLevel 等关键配置，为后续平台安全检查、弱口令攻击实验和防御验证做准备。

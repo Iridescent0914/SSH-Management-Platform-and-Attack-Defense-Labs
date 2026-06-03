@@ -1,0 +1,783 @@
+阶段 8：私钥泄露与密钥轮换实验记录
+
+一、阶段目标
+
+本阶段目标是验证 SSH 私钥泄露风险，并通过密钥轮换证明删除泄露私钥对应的旧公钥后，攻击端无法继续使用泄露私钥登录目标主机。
+
+阶段 8 的核心逻辑如下：
+
+1. VM1 管理端生成旧密钥 old_test_key。
+2. 将旧公钥添加到 VM2 的 testuser authorized_keys。
+3. VM1 使用旧私钥登录 VM2 成功。
+4. 将旧私钥复制到 VM3，模拟管理端私钥泄露。
+5. VM3 使用泄露旧私钥登录 VM2 成功。
+6. VM1 生成新密钥 new_test_key。
+7. 先将新公钥添加到 VM2，并验证新私钥可用。
+8. 从 VM2 的 authorized_keys 中删除旧公钥。
+9. VM3 使用泄露旧私钥登录失败。
+10. VM1 使用新私钥仍然登录成功。
+11. VM1 平台改用新私钥继续连接 VM2。
+
+本阶段要证明：
+
+即使已经在阶段 7 中禁用了 SSH 密码登录，如果服务器仍然信任泄露私钥对应的公钥，攻击者仍然可以通过公钥认证登录系统。对于私钥泄露风险，必须通过密钥轮换删除旧公钥，才能使泄露私钥失效。
+
+二、实验环境
+
+本阶段继续使用三台虚拟机。
+
+1. VM1：SSH-VM1
+   - 角色：管理端
+   - 系统：Ubuntu Desktop
+   - Host-only IP：192.168.45.101
+   - 用途：生成旧密钥和新密钥，管理 VM2 的 authorized_keys，并在平台中使用新私钥连接 VM2
+
+2. VM2：SSH-VM2
+   - 角色：SSH 目标机 / 被管理端
+   - 系统：Ubuntu Server
+   - Host-only IP：192.168.45.102
+   - 用途：运行 OpenSSH Server，保存 authorized_keys，记录 SSH 公钥登录日志
+
+3. VM3：SSH-VM3
+   - 角色：攻击端
+   - 系统：Kali Linux
+   - Host-only IP：192.168.45.103
+   - 用途：保存泄露旧私钥，并尝试使用泄露私钥登录 VM2
+
+实验账号：
+
+用户名：testuser
+
+阶段 7 后的 SSH 配置状态：
+
+passwordauthentication no
+pubkeyauthentication yes
+
+说明：阶段 8 在禁用密码登录的基础上进行，因此所有登录验证均通过公钥认证完成。
+
+三、实验前检查
+
+1. VM2 确认密码登录已关闭
+
+在 VM2 上执行：
+
+sudo sshd -T | grep -E '^(passwordauthentication|pubkeyauthentication)'
+
+预期结果：
+
+passwordauthentication no
+pubkeyauthentication yes
+
+该结果说明：
+
+1. VM2 当前不再接受 SSH 密码认证。
+2. VM2 仍然允许公钥认证。
+3. 阶段 8 的登录验证必须依赖私钥。
+
+2. VM1 确认阶段 7 管理密钥仍可登录 VM2
+
+在 VM1 上执行：
+
+ssh -i ~/.ssh/vm2_test_key -o IdentitiesOnly=yes testuser@192.168.45.102
+
+登录成功后执行：
+
+whoami
+hostname
+exit
+
+该步骤证明 VM1 仍然拥有合法管理通道，可以继续进行后续密钥添加与轮换操作。
+
+四、VM1 生成旧密钥 old_test_key
+
+在 VM1 上执行：
+
+cd ~
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+ssh-keygen -t ed25519 -f ~/.ssh/old_test_key
+
+提示输入 passphrase 时直接按 Enter，不设置 passphrase。
+
+生成后设置权限：
+
+chmod 600 ~/.ssh/old_test_key
+chmod 644 ~/.ssh/old_test_key.pub
+
+查看旧公钥指纹：
+
+ssh-keygen -lf ~/.ssh/old_test_key.pub
+
+该旧密钥用于模拟“后续被泄露的管理私钥”。
+
+五、VM1 将旧公钥添加到 VM2
+
+由于阶段 7 已经禁用密码登录，不能再依赖密码方式执行 ssh-copy-id。因此，本阶段使用阶段 7 已经可用的 vm2_test_key 登录 VM2，并将 old_test_key.pub 追加到 VM2 的 authorized_keys。
+
+在 VM1 上执行：
+
+cat ~/.ssh/old_test_key.pub | ssh -i ~/.ssh/vm2_test_key -o IdentitiesOnly=yes testuser@192.168.45.102 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys'
+
+然后在 VM1 上验证 VM2 的 authorized_keys 中已包含旧公钥：
+
+ssh -i ~/.ssh/vm2_test_key -o IdentitiesOnly=yes testuser@192.168.45.102 "ssh-keygen -lf ~/.ssh/authorized_keys"
+
+查看输出中的公钥指纹，并与 VM1 上 old_test_key.pub 的指纹进行比对。
+
+六、VM1 验证旧私钥登录成功
+
+在 VM1 上执行：
+
+ssh -i ~/.ssh/old_test_key -o IdentitiesOnly=yes testuser@192.168.45.102
+
+登录成功后执行：
+
+whoami
+hostname
+exit
+
+预期结果：
+
+whoami 输出 testuser。
+hostname 输出 VM2 主机名，例如 ubuntu-server。
+
+该步骤说明 VM2 当前信任 old_test_key 对应的旧公钥，因此 old_test_key 可以正常登录 VM2。
+
+七、VM2 查看旧密钥登录日志
+
+在 VM2 上执行：
+
+sudo grep 'Accepted publickey' /var/log/auth.log | tail -n 20
+
+预期可以看到来自 VM1 的公钥登录记录：
+
+Accepted publickey for testuser from 192.168.45.101
+
+该日志证明旧密钥对应的公钥认证登录已被 VM2 记录。
+
+八、模拟私钥泄露：将旧私钥复制到 VM3
+
+1. 初次 scp 报错
+
+在 VM1 上尝试执行：
+
+scp -i ~/.ssh/vm2_test_key -o IdentitiesOnly=yes ~/.ssh/old_test_key yry@192.168.45.103:~/attack_keys/leaked_test_key
+
+结果报错：
+
+ssh: connect to host 192.168.45.103 port 22: Connection refused
+lost connection
+
+原因分析：
+
+该错误不是 VM1 到 VM3 网络不通，也不是 old_test_key 或 vm2_test_key 的问题，而是 VM3 的 22 端口没有 SSH 服务在监听。也就是说，VM3 没有启动 OpenSSH Server，所以 VM1 无法通过 scp 将文件复制到 VM3。
+
+2. 解决方法一：在 VM3 开启 SSH 服务
+
+在 VM3 上执行：
+
+sudo apt update
+sudo apt install openssh-server -y
+sudo systemctl enable --now ssh
+sudo systemctl status ssh --no-pager
+
+确认 SSH 服务状态：
+
+Active: active (running)
+
+确认 22 端口监听：
+
+ss -tln | grep ':22'
+
+再确认 VM3 当前用户名：
+
+whoami
+
+如果用户名为 yry，则 VM1 上可以使用：
+
+scp ~/.ssh/old_test_key yry@192.168.45.103:~/attack_keys/leaked_test_key
+
+如果 VM3 用户名不是 yry，例如是 kali，则需要改成：
+
+scp ~/.ssh/old_test_key kali@192.168.45.103:~/attack_keys/leaked_test_key
+
+注意：
+
+vm2_test_key 是 VM1 登录 VM2 用的密钥，不一定能登录 VM3。因此从 VM1 复制文件到 VM3 时，不一定需要使用 -i ~/.ssh/vm2_test_key，除非 VM3 也配置了对应公钥。
+
+3. 解决方法二：手动复制私钥内容
+
+如果不想在 VM3 上开启 SSH 服务，也可以通过剪贴板模拟私钥泄露。
+
+在 VM1 上执行：
+
+cat ~/.ssh/old_test_key
+
+复制完整私钥内容，包括：
+
+-----BEGIN OPENSSH PRIVATE KEY-----
+...
+-----END OPENSSH PRIVATE KEY-----
+
+在 VM3 上执行：
+
+mkdir -p ~/attack_keys
+chmod 700 ~/attack_keys
+nano ~/attack_keys/leaked_test_key
+
+粘贴完整私钥内容，保存后执行：
+
+chmod 600 ~/attack_keys/leaked_test_key
+ls -l ~/attack_keys/leaked_test_key
+
+该方式同样可以模拟“私钥泄露到攻击端”。
+
+九、VM3 使用泄露旧私钥登录 VM2
+
+复制完成后，在 VM3 上执行：
+
+ssh -i ~/attack_keys/leaked_test_key -o IdentitiesOnly=yes testuser@192.168.45.102
+
+预期登录成功。
+
+登录后执行：
+
+whoami
+hostname
+exit
+
+预期结果：
+
+whoami 输出 testuser。
+hostname 输出 VM2 主机名。
+
+该步骤是阶段 8 的核心攻击验证：
+
+即使密码登录已经关闭，只要攻击者获得了仍被 VM2 信任的旧私钥，就可以绕过密码认证，通过公钥认证登录 VM2。
+
+十、VM2 查看 VM3 使用泄露私钥登录日志
+
+在 VM2 上执行：
+
+sudo grep 'Accepted publickey' /var/log/auth.log | tail -n 30
+
+预期看到来自 VM3 的公钥认证登录记录：
+
+Accepted publickey for testuser from 192.168.45.103
+
+其中：
+
+192.168.45.103 为 VM3 攻击端。
+
+该日志证明攻击端确实使用泄露私钥完成了 SSH 公钥认证登录。
+
+十一、VM1 生成新密钥 new_test_key
+
+在 VM1 上执行：
+
+ssh-keygen -t ed25519 -f ~/.ssh/new_test_key
+
+提示输入 passphrase 时直接按 Enter，不设置 passphrase。
+
+设置权限：
+
+chmod 600 ~/.ssh/new_test_key
+chmod 644 ~/.ssh/new_test_key.pub
+
+查看新公钥指纹：
+
+ssh-keygen -lf ~/.ssh/new_test_key.pub
+
+new_test_key 是密钥轮换后的新管理密钥，后续 VM1 将使用它继续管理 VM2。
+
+十二、VM1 将新公钥添加到 VM2
+
+删除旧公钥之前，必须先添加新公钥并验证新私钥可用。否则一旦误删旧公钥，可能导致无法远程登录 VM2。
+
+在 VM1 上执行：
+
+cat ~/.ssh/new_test_key.pub | ssh -i ~/.ssh/vm2_test_key -o IdentitiesOnly=yes testuser@192.168.45.102 'cat >> ~/.ssh/authorized_keys'
+
+该命令应在 VM1 上运行，因为：
+
+1. ~/.ssh/new_test_key.pub 位于 VM1。
+2. ~/.ssh/vm2_test_key 位于 VM1。
+3. 目标文件 ~/.ssh/authorized_keys 位于 VM2 的 testuser 用户目录。
+4. 命令的作用是通过 SSH 登录 VM2，把 VM1 本地的新公钥追加到 VM2 的 authorized_keys。
+
+十三、VM2 authorized_keys 中出现三个公钥的原因
+
+添加新公钥后，在 VM1 上执行：
+
+ssh -i ~/.ssh/vm2_test_key -o IdentitiesOnly=yes testuser@192.168.45.102 "ssh-keygen -lf ~/.ssh/authorized_keys"
+
+输出中看到三个公钥指纹，例如：
+
+256 SHA256:qOwzNnHox2dvcNmyDxLn4IM1Y+vDWoGTQc3EdRxMC28 yry@SSH-VM1 (ED25519)
+256 SHA256:7zhXqk2/MCRxa+v/fFAn0cX+QEJDH13r+dAXkUqLFTo yry@SSH-VM1 (ED25519)
+256 SHA256:r74cC5d6o6y/73j6nClr20UnjRPpXNeVcrGrJz2hGpw yry@SSH-VM1 (ED25519)
+
+这是正常现象。三个公钥一般分别对应：
+
+1. vm2_test_key.pub
+   - 阶段 7 生成的管理密钥
+   - 用于保证 VM1 能通过私钥登录 VM2
+
+2. old_test_key.pub
+   - 阶段 8 生成的旧密钥
+   - 用于模拟后续私钥泄露
+
+3. new_test_key.pub
+   - 阶段 8 生成的新密钥
+   - 用于密钥轮换后的合法管理
+
+因此，authorized_keys 中暂时出现三个公钥是阶段 8 轮换过程中的正常中间状态。
+
+十四、VM1 对照三个公钥指纹
+
+在 VM1 上执行：
+
+echo "=== vm2_test_key.pub ==="
+ssh-keygen -lf ~/.ssh/vm2_test_key.pub
+
+echo "=== old_test_key.pub ==="
+ssh-keygen -lf ~/.ssh/old_test_key.pub
+
+echo "=== new_test_key.pub ==="
+ssh-keygen -lf ~/.ssh/new_test_key.pub
+
+将输出指纹与 VM2 authorized_keys 中的三个指纹对照，确认：
+
+1. 哪一个是阶段 7 的 vm2_test_key。
+2. 哪一个是阶段 8 的 old_test_key。
+3. 哪一个是阶段 8 的 new_test_key。
+
+这样后续删除旧公钥时，可以确认删除的是 old_test_key.pub 对应的那一行。
+
+十五、命令执行位置错误的排错
+
+1. 错误操作
+
+曾在 VM2 上执行：
+
+ssh -i ~/.ssh/vm2_test_key -o IdentitiesOnly=yes testuser@192.168.45.102 "ssh-keygen -lf ~/.ssh/authorized_keys"
+
+结果出现：
+
+Warning: Identity file /home/yry/.ssh/vm2_test_key not accessible: No such file or directory.
+The authenticity of host '192.168.45.102 (192.168.45.102)' can't be established.
+Permission denied (publickey).
+
+2. 原因分析
+
+该命令应在 VM1 上运行，而不是在 VM2 上运行。
+
+原因：
+
+1. vm2_test_key 私钥文件在 VM1 上，不在 VM2 的 /home/yry/.ssh/ 中。
+2. 在 VM2 上执行该命令时，系统会去 VM2 本机查找 /home/yry/.ssh/vm2_test_key，因此提示文件不存在。
+3. 同时，该命令实际变成了 VM2 通过 SSH 连接自己，即 VM2 -> VM2。
+4. 因为 VM2 本机没有对应私钥，所以登录失败。
+
+3. 正确做法
+
+如果要从 VM1 远程查看 VM2 的 authorized_keys，应在 VM1 上执行：
+
+ssh -i ~/.ssh/vm2_test_key -o IdentitiesOnly=yes testuser@192.168.45.102 "ssh-keygen -lf ~/.ssh/authorized_keys"
+
+如果已经在 VM2 本地，只需要直接查看 testuser 的 authorized_keys，不需要 ssh -i：
+
+sudo -u testuser ssh-keygen -lf /home/testuser/.ssh/authorized_keys
+
+或者切换到 testuser 后执行：
+
+ssh-keygen -lf ~/.ssh/authorized_keys
+
+该问题说明阶段 8 中需要注意命令执行位置：涉及 VM1 本地私钥文件的命令必须在 VM1 上执行。
+
+十六、VM1 验证新私钥登录成功
+
+在 VM1 上执行：
+
+ssh -i ~/.ssh/new_test_key -o IdentitiesOnly=yes testuser@192.168.45.102
+
+登录成功后执行：
+
+whoami
+hostname
+exit
+
+该步骤证明新公钥已经正确添加到 VM2，新私钥已经可用。
+
+只有在该步骤成功后，才可以删除旧公钥。
+
+十七、VM2 删除旧公钥
+
+1. 推荐方式：按旧公钥内容精确删除
+
+在 VM1 上执行：
+
+OLD_PUB=$(cat ~/.ssh/old_test_key.pub)
+ssh -i ~/.ssh/new_test_key -o IdentitiesOnly=yes testuser@192.168.45.102 "grep -vF '$OLD_PUB' ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+
+该命令含义：
+
+1. 在 VM1 本地读取 old_test_key.pub 的完整内容。
+2. 使用 new_test_key 登录 VM2。
+3. 在 VM2 上从 authorized_keys 中删除与 old_test_key.pub 完全一致的那一行。
+4. 保留其他公钥，例如 vm2_test_key.pub 和 new_test_key.pub。
+5. 重新设置 authorized_keys 权限为 600。
+
+2. 删除后检查 authorized_keys
+
+在 VM1 上执行：
+
+ssh -i ~/.ssh/new_test_key -o IdentitiesOnly=yes testuser@192.168.45.102 "ssh-keygen -lf ~/.ssh/authorized_keys"
+
+删除旧公钥后，正常应不再包含 old_test_key.pub 的指纹。
+
+通常剩余公钥为：
+
+1. vm2_test_key.pub
+2. new_test_key.pub
+
+这说明旧公钥已从 VM2 的 authorized_keys 中移除。
+
+十八、VM3 验证泄露旧私钥失效
+
+在 VM3 上执行：
+
+ssh -i ~/attack_keys/leaked_test_key -o IdentitiesOnly=yes testuser@192.168.45.102
+
+预期结果为失败：
+
+Permission denied (publickey).
+
+或者类似：
+
+testuser@192.168.45.102: Permission denied (publickey).
+
+该步骤证明：
+
+VM2 已经不再信任 old_test_key 对应的旧公钥，因此 VM3 即使持有泄露旧私钥，也无法继续登录 VM2。
+
+十九、VM1 验证新私钥仍然有效
+
+在 VM1 上执行：
+
+ssh -i ~/.ssh/new_test_key -o IdentitiesOnly=yes testuser@192.168.45.102
+
+登录成功后执行：
+
+whoami
+hostname
+exit
+
+该步骤证明：
+
+1. 删除旧公钥后，合法管理端 VM1 仍然可以使用新私钥登录 VM2。
+2. 密钥轮换没有影响合法管理通道。
+3. 新旧密钥替换过程成功。
+
+二十、VM2 查看认证日志
+
+在 VM2 上执行：
+
+sudo grep -E 'Accepted publickey|Failed publickey|Permission denied' /var/log/auth.log | tail -n 80
+
+部分 Ubuntu 系统不一定记录 Failed publickey，因此也可以查看最近 SSH 日志：
+
+sudo grep 'sshd' /var/log/auth.log | tail -n 100
+
+重点查看以下记录：
+
+1. VM1 使用旧私钥或新私钥登录：
+   Accepted publickey for testuser from 192.168.45.101
+
+2. VM3 使用泄露旧私钥登录成功：
+   Accepted publickey for testuser from 192.168.45.103
+
+阶段 8 中：
+
+192.168.45.101 表示 VM1 合法管理端。
+192.168.45.103 表示 VM3 攻击端。
+
+这些日志用于证明私钥泄露登录和密钥轮换过程。
+
+二十一、VM1 平台改用新私钥连接
+
+1. 启动平台
+
+在 VM1 上执行：
+
+cd ~/ssh_manage_platform
+source venv/bin/activate
+python app.py
+
+浏览器访问：
+
+http://192.168.45.101:5000
+
+2. 平台连接测试
+
+在首页填写：
+
+目标 IP：192.168.45.102
+SSH 端口：22
+用户名：testuser
+认证方式：私钥认证
+密码或私钥路径：/home/yry/.ssh/new_test_key
+
+如果 VM1 用户名不是 yry，可在 VM1 上执行：
+
+realpath ~/.ssh/new_test_key
+
+将实际路径填入平台。
+
+点击：
+
+执行连接测试
+
+预期结果：
+
+连接成功
+whoami 输出：testuser
+hostname 输出：VM2 主机名
+
+该步骤证明平台在密钥轮换后可以使用新私钥继续管理 VM2。
+
+二十二、VM1 平台查看公钥登录日志
+
+浏览器访问：
+
+http://192.168.45.101:5000/logs
+
+填写：
+
+目标 IP：192.168.45.102
+SSH 端口：22
+用户名：testuser
+认证方式：私钥认证
+密码或私钥路径：/home/yry/.ssh/new_test_key
+
+点击：
+
+读取并分析 auth.log
+
+预期看到：
+
+Accepted publickey
+testuser
+192.168.45.101
+
+如果平台的成功登录记录表支持 publickey 类型，应显示认证方式为 publickey。
+
+该步骤证明平台能够读取并展示密钥轮换后的公钥登录记录。
+
+二十三、阶段 8 常见问题与处理
+
+1. scp 到 VM3 报 Connection refused
+
+现象：
+
+ssh: connect to host 192.168.45.103 port 22: Connection refused
+lost connection
+
+原因：
+
+VM3 没有运行 SSH Server，22 端口没有监听。
+
+解决：
+
+在 VM3 上安装并启动 SSH：
+
+sudo apt update
+sudo apt install openssh-server -y
+sudo systemctl enable --now ssh
+sudo systemctl status ssh --no-pager
+
+或者改用手动复制私钥内容的方式模拟泄露。
+
+2. VM3 使用泄露私钥提示权限过宽
+
+现象：
+
+WARNING: UNPROTECTED PRIVATE KEY FILE!
+
+解决：
+
+chmod 600 ~/attack_keys/leaked_test_key
+
+3. VM3 使用旧私钥仍然可以登录
+
+原因：
+
+old_test_key.pub 对应的旧公钥还没有从 VM2 的 authorized_keys 中删除。
+
+处理：
+
+在 VM1 上查看旧公钥指纹：
+
+ssh-keygen -lf ~/.ssh/old_test_key.pub
+
+在 VM2 上查看 authorized_keys 指纹：
+
+ssh-keygen -lf ~/.ssh/authorized_keys
+
+如果旧指纹仍存在，继续删除旧公钥。
+
+4. VM1 新私钥登录失败
+
+原因可能是 new_test_key.pub 没有成功追加到 VM2 的 authorized_keys。
+
+处理：
+
+先不要删除任何旧公钥，使用仍可用的 vm2_test_key 或 old_test_key 登录 VM2 检查 authorized_keys：
+
+ssh -i ~/.ssh/vm2_test_key -o IdentitiesOnly=yes testuser@192.168.45.102 "ssh-keygen -lf ~/.ssh/authorized_keys"
+
+确认 new_test_key.pub 的指纹是否存在。
+
+5. 命令执行位置混淆
+
+原则：
+
+1. 涉及 ~/.ssh/vm2_test_key、~/.ssh/old_test_key、~/.ssh/new_test_key 的命令，一般在 VM1 上执行。
+2. 使用 leaked_test_key 的命令，在 VM3 上执行。
+3. 查看 VM2 本地服务配置和 auth.log 的命令，在 VM2 上执行。
+4. 远程查看 VM2 authorized_keys 的命令，可以在 VM1 上通过 ssh 执行。
+5. 在 VM2 本地查看 authorized_keys 时，不需要再 ssh 到 192.168.45.102。
+
+二十四、阶段 8 截图记录
+
+本阶段建议保留以下截图：
+
+1. VM2 passwordauthentication no、pubkeyauthentication yes 截图
+   - 证明阶段 8 在禁用密码登录的环境下进行
+
+2. VM1 使用阶段 7 密钥 vm2_test_key 登录 VM2 成功截图
+   - 证明实验前合法管理通道可用
+
+3. VM1 生成 old_test_key 截图
+   - 证明旧密钥已创建
+
+4. VM1 old_test_key.pub 指纹截图
+   - 用于后续识别旧公钥
+
+5. VM1 添加 old_test_key.pub 到 VM2 截图
+   - 证明旧公钥已添加
+
+6. VM2 authorized_keys 中包含旧公钥截图
+   - 证明 VM2 信任旧公钥
+
+7. VM1 使用 old_test_key 登录 VM2 成功截图
+   - 证明旧私钥可用
+
+8. VM2 auth.log 中 Accepted publickey 来自 VM1 截图
+   - 证明旧私钥登录被记录
+
+9. VM3 attack_keys/leaked_test_key 存在截图
+   - 证明旧私钥已泄露到 VM3
+
+10. VM3 使用 leaked_test_key 登录 VM2 成功截图
+    - 证明私钥泄露风险存在
+
+11. VM2 auth.log 中 Accepted publickey 来自 192.168.45.103 截图
+    - 证明攻击端通过泄露私钥登录
+
+12. VM1 生成 new_test_key 截图
+    - 证明新密钥已创建
+
+13. VM1 new_test_key.pub 指纹截图
+    - 用于后续识别新公钥
+
+14. VM1 添加 new_test_key.pub 到 VM2 截图
+    - 证明新公钥已添加
+
+15. VM2 authorized_keys 出现三个指纹截图
+    - 证明 vm2_test_key、old_test_key、new_test_key 三个公钥均存在
+
+16. VM1 对照三个公钥指纹截图
+    - 证明已识别旧公钥和新公钥
+
+17. VM1 使用 new_test_key 登录 VM2 成功截图
+    - 证明新密钥可用
+
+18. VM2 authorized_keys 删除旧公钥后截图
+    - 证明旧公钥已删除
+
+19. VM3 使用 leaked_test_key 登录失败截图
+    - 证明泄露旧私钥失效
+
+20. VM1 使用 new_test_key 登录成功截图
+    - 证明合法管理端仍然可用
+
+21. VM2 auth.log 中公钥登录记录截图
+    - 证明公钥认证过程有日志证据
+
+22. VM1 平台使用 new_test_key 连接成功截图
+    - 证明平台适配密钥轮换后状态
+
+23. VM1 平台日志中 Accepted publickey 截图
+    - 证明平台能展示公钥登录记录
+
+建议截图目录：
+
+screenshots/08_key_leak_rotation/
+├── 01_VM2_password_no_pubkey_yes.png
+├── 02_VM1_existing_key_login_success.png
+├── 03_VM1_generate_old_key.png
+├── 04_VM1_old_key_fingerprint.png
+├── 05_VM1_add_old_pubkey_to_VM2.png
+├── 06_VM2_authorized_keys_contains_old_key.png
+├── 07_VM1_old_key_login_success.png
+├── 08_VM2_auth_log_old_key_publickey.png
+├── 09_VM3_leaked_key_exists.png
+├── 10_VM3_leaked_old_key_login_success.png
+├── 11_VM2_auth_log_VM3_leaked_key_login.png
+├── 12_VM1_generate_new_key.png
+├── 13_VM1_new_key_fingerprint.png
+├── 14_VM1_add_new_pubkey_to_VM2.png
+├── 15_VM2_authorized_keys_three_keys.png
+├── 16_VM1_compare_key_fingerprints.png
+├── 17_VM1_new_key_login_success_before_remove_old.png
+├── 18_VM2_authorized_keys_after_remove_old.png
+├── 19_VM3_leaked_old_key_login_failed_after_rotation.png
+├── 20_VM1_new_key_login_success_after_rotation.png
+├── 21_VM2_auth_log_key_rotation.png
+├── 22_VM1_platform_new_key_connect_success.png
+└── 23_VM1_platform_logs_publickey_new_key.png
+
+二十五、阶段 8 验收结果
+
+阶段 8 完成后，应满足以下条件：
+
+1. VM2 当前 passwordauthentication no。
+2. VM2 当前 pubkeyauthentication yes。
+3. VM1 可以使用 vm2_test_key 登录 VM2。
+4. VM1 已生成 old_test_key 和 old_test_key.pub。
+5. VM2 authorized_keys 中已添加 old_test_key.pub。
+6. VM1 可以使用 old_test_key 登录 VM2。
+7. VM3 中存在 leaked_test_key。
+8. VM3 可以使用 leaked_test_key 登录 VM2。
+9. VM2 auth.log 中出现来自 192.168.45.103 的 Accepted publickey。
+10. VM1 已生成 new_test_key 和 new_test_key.pub。
+11. VM2 authorized_keys 中已添加 new_test_key.pub。
+12. VM1 可以使用 new_test_key 登录 VM2。
+13. VM2 authorized_keys 中旧公钥 old_test_key.pub 已删除。
+14. VM3 使用 leaked_test_key 登录 VM2 失败。
+15. VM1 使用 new_test_key 登录 VM2 仍然成功。
+16. VM1 平台可以使用 new_test_key 连接 VM2。
+17. VM1 平台可以读取并显示 Accepted publickey 日志。
+
+二十六、阶段 8 实验结论
+
+本阶段验证了 SSH 私钥泄露风险与密钥轮换的防御效果。
+
+首先，在 VM1 管理端生成旧密钥 old_test_key，并将旧公钥添加到 VM2 的 authorized_keys 中。验证 VM1 能够使用旧私钥登录 VM2 后，将旧私钥复制到 VM3，模拟管理端私钥泄露。随后，VM3 使用泄露旧私钥成功登录 VM2，VM2 的 auth.log 中记录了来自 192.168.45.103 的 Accepted publickey。该结果说明，即使已经禁用密码登录，只要服务器仍然信任泄露私钥对应的公钥，攻击者仍然可以通过公钥认证登录目标系统。
+
+随后进行密钥轮换。VM1 生成新密钥 new_test_key，先将新公钥添加到 VM2 并验证新私钥可以登录，再从 VM2 的 authorized_keys 中删除旧公钥。删除旧公钥后，VM3 使用泄露旧私钥登录失败，而 VM1 使用新私钥仍然可以正常登录 VM2，VM1 管理平台也可以使用新私钥继续连接 VM2。
+
+实验说明：禁用密码登录可以防止弱口令暴力破解，但不能解决私钥泄露问题。对于泄露私钥，必须及时删除对应旧公钥并进行密钥轮换，才能阻止攻击者继续访问系统。
+
+阶段 8 完成后，本实验的 SSH 服务搭建、平台实现、弱口令攻击、Fail2ban 防御、禁用密码登录、私钥泄露与密钥轮换验证均已完成。下一步可以进入阶段 9：实验报告、源码、截图和提交材料整理。

@@ -1,0 +1,659 @@
+阶段 6：Fail2ban 防御验证记录
+
+一、阶段目标
+
+本阶段目标是在 VM2 SSH 目标机上安装并启用 Fail2ban，验证其能根据 SSH 认证失败日志识别高频错误登录行为，并自动封禁攻击端 VM3 的 IP 地址。
+
+阶段 6 与阶段 5 的区别如下：
+
+阶段 5：关闭或不启用 Fail2ban，验证弱口令 testuser / 123456 可以被字典猜中。
+阶段 6：启用 Fail2ban，使用错误密码持续尝试 SSH 登录，验证攻击端 IP 会被自动封禁。
+
+本阶段重点证明以下内容：
+
+1. VM2 已安装 Fail2ban。
+2. VM2 已配置 sshd jail。
+3. Fail2ban 服务处于 active (running) 状态。
+4. VM3 使用错误密码多次尝试登录 VM2。
+5. VM2 的 auth.log 中出现多条 Failed password。
+6. Fail2ban 将 VM3 的 IP：192.168.45.103 加入封禁列表。
+7. VM3 被封禁后无法继续通过 SSH 连接 VM2。
+8. 解除封禁后，VM3 可以重新连接 VM2。
+9. VM1 管理平台可以读取 VM2 的 auth.log，并显示来自 VM3 的失败登录统计。
+10. 平台能够将该行为判断为疑似暴力破解。
+
+二、实验环境
+
+本阶段继续使用前面阶段搭建的三台虚拟机。
+
+1. VM1：SSH-VM1
+   - 角色：管理端
+   - 系统：Ubuntu Desktop
+   - Host-only IP：192.168.45.101
+   - 用途：运行 Flask SSH 管理平台，读取 VM2 认证日志并展示失败登录统计
+
+2. VM2：SSH-VM2
+   - 角色：SSH 目标机 / 被管理端
+   - 系统：Ubuntu Server
+   - Host-only IP：192.168.45.102
+   - 用途：运行 OpenSSH Server，安装 Fail2ban，并作为防御验证目标
+
+3. VM3：SSH-VM3
+   - 角色：攻击端
+   - 系统：Kali Linux
+   - Host-only IP：192.168.45.103
+   - 用途：使用错误密码持续尝试 SSH 登录，触发 Fail2ban 封禁
+
+实验账号：
+
+用户名：testuser
+正确密码：123456
+
+注意：阶段 6 中 VM3 的错误密码脚本不使用正确密码 123456，目的是触发 Fail2ban 封禁，而不是再次登录成功。
+
+三、VM2 安装 Fail2ban
+
+1. 使用管理员账号登录 VM2
+
+Fail2ban 的安装、配置和启动需要管理员权限，不能使用 testuser 的受限 sudo 权限完成。因此，本阶段在 VM2 上使用管理员账号 yry 执行相关命令。
+
+如果当前处于 testuser 会话，应先退出：
+
+exit
+
+然后使用 VM2 的管理员账号登录。
+
+2. 安装 Fail2ban
+
+在 VM2 上执行：
+
+sudo apt update
+sudo apt install fail2ban -y
+
+安装完成后查看版本：
+
+fail2ban-client --version
+
+该步骤用于证明 Fail2ban 已安装完成。
+
+四、VM2 配置 sshd jail
+
+1. 创建专用配置文件
+
+本实验不直接修改 /etc/fail2ban/jail.conf，而是在 /etc/fail2ban/jail.d/ 下创建独立配置文件，便于管理和截图。
+
+在 VM2 上执行：
+
+sudo nano /etc/fail2ban/jail.d/sshd.local
+
+写入以下内容：
+
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+backend = systemd
+maxretry = 5
+findtime = 300
+bantime = 600
+
+保存退出。
+
+2. 参数说明
+
+enabled = true
+启用 sshd jail。
+
+port = ssh
+防护 SSH 服务端口，等价于 22。
+
+filter = sshd
+使用 Fail2ban 内置的 sshd 过滤规则。
+
+logpath = /var/log/auth.log
+指定认证日志路径。
+
+backend = systemd
+使用 systemd 日志后端读取 SSH 认证记录。
+
+maxretry = 5
+同一来源 IP 在统计窗口内失败 5 次后触发封禁。
+
+findtime = 300
+统计时间窗口为 300 秒。
+
+bantime = 600
+封禁时间为 600 秒。
+
+该配置含义是：同一来源 IP 在 300 秒内触发 5 次 SSH 登录失败后，会被封禁 600 秒。
+
+3. 查看配置文件
+
+执行：
+
+sudo cat /etc/fail2ban/jail.d/sshd.local
+
+确认配置内容正确。
+
+五、VM2 启动 Fail2ban
+
+1. 启用并重启 Fail2ban
+
+在 VM2 上执行：
+
+sudo systemctl enable fail2ban
+sudo systemctl restart fail2ban
+sudo systemctl status fail2ban --no-pager
+
+预期结果：
+
+Active: active (running)
+
+说明 Fail2ban 服务已正常运行。
+
+2. 查看 Fail2ban 总状态
+
+执行：
+
+sudo fail2ban-client status
+
+预期结果中应包含 sshd jail，例如：
+
+Jail list: sshd
+
+说明 sshd 防护规则已加载。
+
+3. 查看 sshd jail 攻击前状态
+
+执行：
+
+sudo fail2ban-client status sshd
+
+攻击前状态一般为：
+
+Currently failed: 0
+Total failed: 0
+Currently banned: 0
+Total banned: 0
+Banned IP list:
+
+说明攻击前没有 IP 被封禁。
+
+六、VM3 准备错误密码字典
+
+1. 进入攻击目录
+
+在 VM3 上执行：
+
+cd ~/ssh_attack
+
+2. 备份阶段 5 字典和脚本
+
+执行：
+
+cp users.txt users_stage5_success.txt
+cp passwords.txt passwords_stage5_success.txt
+cp ssh_bruteforce.py ssh_bruteforce_stage5.py
+
+这样可以保留阶段 5 成功命中弱口令的实验材料。
+
+3. 创建错误用户名字典
+
+执行：
+
+cat > users_wrong.txt << 'EOF'
+root
+admin
+testuser
+EOF
+
+4. 创建错误密码字典
+
+执行：
+
+cat > passwords_wrong.txt << 'EOF'
+111111
+abc123
+qwerty
+wrongpass
+test123
+EOF
+
+注意：
+
+1. 该密码字典中不包含正确密码 123456。
+2. 阶段 6 的目的是触发防御，不是再次成功登录。
+3. 由于 maxretry 设置为 5，脚本很可能在尝试 root 用户的 5 个错误密码后就触发封禁，未必会继续尝试 admin 和 testuser。
+
+5. 查看字典内容
+
+执行：
+
+echo "=== users_wrong.txt ==="
+cat users_wrong.txt
+
+echo "=== passwords_wrong.txt ==="
+cat passwords_wrong.txt
+
+确认字典内容无误。
+
+七、VM3 编写错误密码尝试脚本
+
+1. 创建脚本
+
+在 VM3 上执行：
+
+nano ssh_wrong_attempts.py
+
+2. 脚本功能说明
+
+该脚本功能如下：
+
+1. 读取 users_wrong.txt 中的用户名。
+2. 读取 passwords_wrong.txt 中的错误密码。
+3. 使用 Paramiko 尝试 SSH 密码登录。
+4. 目标为 VM2：192.168.45.102:22。
+5. 禁用本机 SSH key 和 agent，确保使用密码认证。
+6. 每次尝试之间暂停 0.5 秒。
+7. 登录失败时输出“认证失败”。
+8. 如果出现连接超时，则提示可能已被 Fail2ban 封禁。
+9. 如果错误密码意外登录成功，则立即停止并提示字典中存在真实密码。
+
+脚本核心配置：
+
+TARGET_HOST = "192.168.45.102"
+TARGET_PORT = 22
+USER_FILE = "users_wrong.txt"
+PASSWORD_FILE = "passwords_wrong.txt"
+DELAY_SECONDS = 0.5
+
+3. 赋予执行权限
+
+执行：
+
+chmod +x ssh_wrong_attempts.py
+
+八、VM3 执行错误密码尝试
+
+在 VM3 上执行：
+
+cd ~/ssh_attack
+python3 ssh_wrong_attempts.py
+
+脚本开始对 VM2 进行错误密码尝试。
+
+预期输出包含多次：
+
+认证失败
+
+当 Fail2ban 封禁生效后，可能出现：
+
+连接超时，可能已被封禁
+
+或者 SSH 连接变慢、无响应、被拒绝。
+
+本实验中，由于 Fail2ban 的 maxretry 设置为 5，VM3 在对 root 用户连续尝试 5 个错误密码后触发封禁。因此，后续平台统计中显示：
+
+来源 IP：192.168.45.103
+失败次数：5
+尝试用户名：root
+判断：疑似暴力破解
+
+这说明 Fail2ban 在达到 5 次失败阈值后及时执行了封禁。
+
+九、VM2 查看 Fail2ban 封禁状态
+
+1. 查看 sshd jail 状态
+
+攻击脚本执行后，在 VM2 上执行：
+
+sudo fail2ban-client status sshd
+
+封禁生效时，应看到类似结果：
+
+Currently banned: 1
+Banned IP list: 192.168.45.103
+
+该结果说明 VM3 的 IP 已经被 Fail2ban 封禁。
+
+2. 查看失败登录日志
+
+在 VM2 上执行：
+
+sudo grep -E 'Failed password|Ban|banned' /var/log/auth.log | tail -n 80
+
+可以看到来自 VM3 的失败记录，例如：
+
+Failed password for root from 192.168.45.103
+
+3. 查看 Fail2ban 日志
+
+部分系统的 Fail2ban 封禁记录主要写入：
+
+/var/log/fail2ban.log
+
+可以执行：
+
+sudo tail -n 80 /var/log/fail2ban.log
+
+预期可能看到类似：
+
+[sshd] Ban 192.168.45.103
+
+这些记录证明 Fail2ban 根据 SSH 失败登录日志触发了封禁动作。
+
+十、VM3 验证封禁后 SSH 失败
+
+在 VM3 上执行：
+
+ssh testuser@192.168.45.102
+
+即使输入正确密码：
+
+123456
+
+也应出现连接失败、连接超时或无响应现象。
+
+这是因为 VM3 的 IP 已被 Fail2ban 封禁，失败原因不是密码错误，而是来源 IP 被阻断。
+
+该验证用于证明 Fail2ban 防御已经生效。
+
+十一、VM2 解除 VM3 封禁
+
+1. 解除封禁
+
+实验结束后，为避免影响后续阶段 7 和阶段 8，需要解除 VM3 的封禁。
+
+在 VM2 上执行：
+
+sudo fail2ban-client set sshd unbanip 192.168.45.103
+
+实际输出为：
+
+1
+
+说明解除封禁命令成功处理了 1 个 IP。
+
+2. 查看解封后状态
+
+执行：
+
+sudo fail2ban-client status sshd
+
+实际结果为：
+
+Status for the jail: sshd
+|- Filter
+|  |- Currently failed: 0
+|  |- Total failed:     5
+|  `- Journal matches:  _SYSTEMD_UNIT=sshd.service + _COMM=sshd
+`- Actions
+   |- Currently banned: 0
+   |- Total banned:     1
+   `- Banned IP list:
+
+结果解释：
+
+Currently banned: 0
+表示当前正在被封禁的 IP 数量为 0。
+
+Banned IP list:
+为空，表示当前没有 IP 被封禁。
+
+Total banned: 1
+表示 sshd jail 自启动以来累计封禁过 1 次。这不是当前封禁数量，而是累计封禁次数。
+
+因此，该结果说明：VM3 曾经被 Fail2ban 成功封禁过 1 次，但现在已经被解除封禁。
+
+3. 阶段 6 中 Total banned: 1 的含义
+
+Total banned: 1 是累计封禁次数，不表示当前仍有 IP 被封禁。
+
+解除封禁后，正确判断依据应看：
+
+Currently banned: 0
+Banned IP list 为空
+
+因此，Total banned: 1 和 Currently banned: 0 同时出现是正常现象，说明：
+
+1. Fail2ban 曾经成功封禁过攻击端。
+2. 当前攻击端已经被解除封禁。
+3. 后续实验不会受到 VM3 被封禁的影响。
+
+十二、VM3 解封后重新连接 VM2
+
+解除封禁后，在 VM3 上重新执行：
+
+ssh testuser@192.168.45.102
+
+输入正确密码：
+
+123456
+
+登录成功后执行：
+
+whoami
+hostname
+exit
+
+该步骤证明 VM3 已经不再被 Fail2ban 阻断，可以继续后续阶段实验。
+
+十三、VM1 平台查看阶段 6 日志统计
+
+1. 启动 VM1 平台
+
+在 VM1 上执行：
+
+cd ~/ssh_manage_platform
+source venv/bin/activate
+python app.py
+
+浏览器访问：
+
+http://192.168.45.101:5000/logs
+
+2. 填写连接信息
+
+在日志查看页面填写：
+
+目标 IP：192.168.45.102
+SSH 端口：22
+用户名：testuser
+认证方式：密码认证
+密码：123456
+
+点击：
+
+读取并分析 auth.log
+
+3. 平台显示结果
+
+平台显示 Failed password 统计：
+
+来源 IP：192.168.45.103
+失败次数：5
+尝试用户名：root
+最近失败时间：2026-06-03T05:29:32.914415+00:00
+判断：疑似暴力破解
+
+该统计说明 VM1 平台能够识别来自 VM3 的高频失败登录行为。
+
+平台还显示成功登录记录，其中包括解封后 VM3 重新登录 VM2 的记录：
+
+认证方式：password
+用户：testuser
+来源 IP：192.168.45.103
+
+该结果说明：
+
+1. VM3 曾触发失败登录统计。
+2. VM3 解除封禁后可以重新连接 VM2。
+3. 平台能够同时展示失败登录和成功登录记录。
+
+十四、关键原始日志说明
+
+平台日志页面中的“关键原始日志”显示的是 auth.log 中包含关键字的最近日志行，而不是完整日志文件。
+
+平台筛选的关键字包括：
+
+Failed password
+Accepted password
+Accepted publickey
+invalid user
+Ban
+banned
+
+因此，关键原始日志中会出现：
+
+1. VM3 错误登录触发的 Failed password 记录
+2. VM1 或 VM3 正常登录产生的 Accepted password 记录
+3. 某些包含关键字的 sudo 命令记录
+
+实验中看到一条类似日志：
+
+sudo: yry : TTY=pts/0 ; PWD=/home/yry ; USER=root ; COMMAND=/usr/bin/grep -E 'Failed password|Ban|banned' /var/log/auth.log
+
+这不是攻击日志，而是管理员账号 yry 在 VM2 上执行 grep 命令时，系统记录到 auth.log 的 sudo 操作日志。由于该命令文本中包含 Failed password、Ban、banned 等关键字，所以被平台筛选出来。
+
+该记录不影响实验结论，只是说明平台的关键字筛选逻辑会显示包含关键字的 sudo 操作。如果后续需要更干净的展示，可以在平台代码中排除包含 sudo: 的日志行。
+
+十五、日志时间格式说明
+
+VM2 当前 auth.log 使用 ISO 时间格式，例如：
+
+2026-06-03T05:29:32.914415+00:00
+
+该时间格式含义如下：
+
+2026-06-03
+表示日期为 2026 年 6 月 3 日。
+
+T
+表示日期与时间的分隔符。
+
+05:29:32
+表示 UTC 时间 05 点 29 分 32 秒。
+
+.914415
+表示微秒。
+
++00:00
+表示 UTC 零时区。
+
+因此：
+
+2026-06-03T05:29:32.914415+00:00
+
+可以读作：
+
+2026 年 6 月 3 日 05:29:32，UTC 时间。
+
+如果换算成北京时间，需要加 8 小时：
+
+UTC 05:29:32 = 北京时间 13:29:32
+
+所以日志时间不是异常，只是系统按 UTC 时间记录。
+
+十六、阶段 6 截图记录
+
+本阶段建议保留以下截图：
+
+1. VM2 安装 Fail2ban 截图
+   - 证明 Fail2ban 已安装
+
+2. VM2 /etc/fail2ban/jail.d/sshd.local 配置截图
+   - 证明 sshd jail 已启用
+   - 证明 maxretry、findtime、bantime 已设置
+
+3. VM2 systemctl status fail2ban 截图
+   - 证明 Fail2ban 服务 active (running)
+
+4. VM2 fail2ban-client status 截图
+   - 证明 sshd jail 已加载
+
+5. VM2 攻击前 fail2ban-client status sshd 截图
+   - 证明攻击前没有 IP 被封禁
+
+6. VM3 错误密码字典截图
+   - 证明阶段 6 不使用正确密码 123456
+
+7. VM3 ssh_wrong_attempts.py 脚本截图
+   - 证明攻击脚本只用于错误密码尝试
+
+8. VM3 错误密码尝试输出截图
+   - 证明 VM3 对 VM2 进行了多次错误登录尝试
+
+9. VM2 fail2ban-client status sshd 封禁截图
+   - 证明 Banned IP list 中出现 192.168.45.103
+
+10. VM2 auth.log 或 fail2ban.log 中封禁记录截图
+    - 证明 Fail2ban 根据日志触发封禁
+
+11. VM3 被封禁后 SSH 失败截图
+    - 证明封禁后 VM3 无法连接 VM2
+
+12. VM2 解除 VM3 封禁截图
+    - 证明 Currently banned 为 0，Banned IP list 为空
+
+13. VM3 解封后重新登录成功截图
+    - 证明解除封禁后 VM3 可继续访问 VM2
+
+14. VM1 平台 Failed password 统计截图
+    - 证明平台统计到 192.168.45.103 的失败登录
+
+15. VM1 平台成功登录记录截图
+    - 证明解封后 VM3 能重新登录
+
+建议截图目录：
+
+screenshots/06_fail2ban/
+├── 01_VM2_install_fail2ban.png
+├── 02_VM2_sshd_local_config.png
+├── 03_VM2_fail2ban_active.png
+├── 04_VM2_fail2ban_status.png
+├── 05_VM2_fail2ban_status_sshd_before_attack.png
+├── 06_VM3_wrong_dict.png
+├── 07_VM3_wrong_attempts_script.png
+├── 08_VM3_wrong_attempts_output.png
+├── 09_VM2_fail2ban_banned_VM3.png
+├── 10_VM2_auth_log_failed_and_ban.png
+├── 11_VM2_fail2ban_log_ban.png
+├── 12_VM3_ssh_failed_after_ban.png
+├── 13_VM2_unban_VM3.png
+├── 14_VM3_login_after_unban.png
+├── 15_VM1_platform_failed_statistics_after_fail2ban.png
+└── 16_VM1_platform_success_login_after_unban.png
+
+十七、阶段 6 验收结果
+
+阶段 6 完成后，应满足以下验收条件：
+
+1. VM2 已安装 Fail2ban。
+2. VM2 已配置 /etc/fail2ban/jail.d/sshd.local。
+3. Fail2ban 服务处于 active (running) 状态。
+4. fail2ban-client status 显示 sshd jail 已加载。
+5. VM3 使用错误密码多次尝试登录 VM2。
+6. VM2 auth.log 中出现来自 192.168.45.103 的 Failed password。
+7. Fail2ban 将 192.168.45.103 加入 Banned IP list。
+8. VM3 被封禁后无法继续连接 VM2 SSH。
+9. VM2 解封命令返回 1，表示成功解除一个 IP 的封禁。
+10. 解封后 fail2ban-client status sshd 显示 Currently banned 为 0。
+11. 解封后 Banned IP list 为空。
+12. Total banned 为 1，说明实验过程中曾累计封禁过一次。
+13. VM3 解封后可以重新通过 SSH 登录 VM2。
+14. VM1 平台能统计来自 192.168.45.103 的 5 次失败登录。
+15. VM1 平台将该行为判断为疑似暴力破解。
+16. VM1 平台能显示 VM3 解封后的成功登录记录。
+
+十八、阶段 6 实验结论
+
+本阶段验证了 Fail2ban 对 SSH 暴力破解行为的防御效果。
+
+在 VM2 上安装并启用 Fail2ban 后，通过 sshd jail 设置 maxretry = 5、findtime = 300、bantime = 600，使 Fail2ban 能够在 300 秒内检测到同一来源 IP 的 5 次 SSH 登录失败后执行封禁。随后，VM3 攻击端使用错误密码持续尝试 SSH 登录 VM2，触发多条 Failed password 认证失败记录。Fail2ban 根据这些失败认证日志识别出高频失败登录行为，并将 VM3 的 IP 192.168.45.103 加入封禁列表。
+
+封禁生效后，VM3 无法继续连接 VM2 的 SSH 服务，说明 Fail2ban 能够有效降低高频密码猜测攻击风险。随后在 VM2 上执行 unbanip 命令解除 VM3 封禁，fail2ban-client status sshd 显示 Currently banned 为 0 且 Banned IP list 为空，说明解封成功。Total banned 为 1，表示本阶段实验过程中 sshd jail 曾累计封禁过一次 IP，证明 Fail2ban 防御机制确实被触发。
+
+VM1 管理平台能够读取 VM2 的 auth.log，并显示来自 192.168.45.103 的 5 次失败登录统计，将其判断为疑似暴力破解。同时，平台也能显示解除封禁后 VM3 重新登录成功的 Accepted password 记录。
+
+因此，阶段 6 的 Fail2ban 防御验证已经完成，可以进入阶段 7：禁用密码登录验证。

@@ -1,0 +1,668 @@
+阶段 7：禁用密码登录验证记录
+
+一、阶段目标
+
+本阶段目标是在 VM2 SSH 目标机上禁用 SSH 密码登录，验证弱口令暴力破解在关闭密码认证后失效，同时保证合法管理端 VM1 仍然可以通过 SSH 私钥登录 VM2。
+
+本阶段的核心原则是：
+
+必须先确认私钥登录成功，再禁用密码登录。
+
+如果未配置好公钥认证就直接关闭 PasswordAuthentication，可能导致无法再通过 SSH 远程登录 VM2。因此，本阶段先在 VM1 上生成密钥对并将公钥添加到 VM2，然后验证私钥登录成功，最后再关闭密码认证。
+
+本阶段完成后应证明：
+
+1. VM1 已生成 SSH 密钥对。
+2. VM1 的公钥已添加到 VM2 的 testuser 的 authorized_keys 中。
+3. VM1 可以使用私钥登录 VM2。
+4. VM2 已关闭 PasswordAuthentication。
+5. sshd -T 显示 passwordauthentication no。
+6. VM3 使用密码方式登录 VM2 失败。
+7. VM1 使用私钥仍然可以登录 VM2。
+8. VM1 平台改用私钥路径后仍可连接 VM2。
+9. VM1 平台安全检查可以显示 passwordauthentication no。
+
+二、实验环境
+
+本阶段继续使用前面阶段的三台虚拟机。
+
+1. VM1：SSH-VM1
+   - 角色：管理端
+   - 系统：Ubuntu Desktop
+   - Host-only IP：192.168.45.101
+   - 用途：生成 SSH 密钥对，使用私钥登录 VM2，并运行 Flask SSH 管理平台
+
+2. VM2：SSH-VM2
+   - 角色：SSH 目标机 / 被管理端
+   - 系统：Ubuntu Server
+   - Host-only IP：192.168.45.102
+   - 用途：运行 OpenSSH Server，关闭密码登录，保留公钥认证
+
+3. VM3：SSH-VM3
+   - 角色：攻击端
+   - 系统：Kali Linux
+   - Host-only IP：192.168.45.103
+   - 用途：验证禁用密码登录后，攻击端无法再使用 testuser / 123456 通过密码认证登录 VM2
+
+实验账号：
+
+用户名：testuser
+原密码：123456
+
+说明：阶段 7 完成后，testuser 的系统密码仍然存在，但 SSH 服务不再接受密码认证，因此该密码不能再用于 SSH 远程登录。
+
+三、阶段 7 操作流程
+
+本阶段按以下顺序执行：
+
+1. VM1 生成 SSH 密钥对。
+2. VM1 将公钥复制到 VM2。
+3. VM1 验证私钥登录 VM2 成功。
+4. VM2 修改 SSH 配置，关闭密码认证。
+5. VM2 使用 sshd -t 检查语法。
+6. VM2 重启 SSH 服务。
+7. VM2 使用 sshd -T 查看最终生效配置。
+8. VM3 验证密码登录失败。
+9. VM1 验证私钥登录仍然成功。
+10. VM1 平台改用私钥连接 VM2。
+11. VM1 平台安全检查显示 passwordauthentication no。
+12. 记录阶段中遇到的配置冲突问题和解决过程。
+
+四、VM1 生成 SSH 密钥对
+
+1. 创建 .ssh 目录
+
+在 VM1 上执行：
+
+cd ~
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+
+2. 生成 Ed25519 密钥对
+
+在 VM1 上执行：
+
+ssh-keygen -t ed25519 -f ~/.ssh/vm2_test_key
+
+系统提示输入 passphrase 时，直接按 Enter，不设置 passphrase。
+
+不设置 passphrase 的原因：
+
+1. 本实验属于本地隔离环境中的验证实验。
+2. 阶段 4 的 Flask 平台代码当前只支持直接读取私钥文件，没有额外处理私钥 passphrase。
+3. 为保证阶段 7 平台私钥连接验证顺利，使用无 passphrase 的实验密钥。
+
+3. 检查密钥文件
+
+执行：
+
+ls -l ~/.ssh/vm2_test_key*
+
+预期生成两个文件：
+
+~/.ssh/vm2_test_key
+~/.ssh/vm2_test_key.pub
+
+其中：
+
+vm2_test_key 是私钥文件，只保存在 VM1。
+vm2_test_key.pub 是公钥文件，需要添加到 VM2。
+
+4. 设置密钥权限
+
+执行：
+
+chmod 600 ~/.ssh/vm2_test_key
+chmod 644 ~/.ssh/vm2_test_key.pub
+
+5. 查看公钥指纹
+
+执行：
+
+ssh-keygen -lf ~/.ssh/vm2_test_key.pub
+
+记录该指纹，用于后续和 VM2 authorized_keys 中的公钥进行比对。
+
+五、VM1 将公钥复制到 VM2
+
+在关闭密码登录前，VM2 仍然允许密码认证，因此可以使用 ssh-copy-id 将 VM1 的公钥复制到 VM2。
+
+在 VM1 上执行：
+
+ssh-copy-id -i ~/.ssh/vm2_test_key.pub testuser@192.168.45.102
+
+输入 testuser 当前密码：
+
+123456
+
+成功后系统提示类似：
+
+Number of key(s) added: 1
+Now try logging into the machine...
+
+该步骤说明 VM1 的公钥已被添加到 VM2 上 testuser 用户的 ~/.ssh/authorized_keys 文件中。
+
+六、VM1 验证私钥登录成功
+
+在 VM1 上执行：
+
+ssh -i ~/.ssh/vm2_test_key -o IdentitiesOnly=yes testuser@192.168.45.102
+
+登录成功后在 VM2 会话中执行：
+
+whoami
+hostname
+exit
+
+预期输出：
+
+whoami 显示 testuser。
+hostname 显示 VM2 的主机名，例如 ubuntu-server。
+
+该步骤是关闭密码登录前的关键验证，说明公钥认证已经可用。只有确认私钥登录成功后，才可以继续关闭 PasswordAuthentication。
+
+七、VM2 确认 authorized_keys 中已有 VM1 公钥
+
+在 VM2 上以 testuser 身份执行：
+
+ls -l ~/.ssh
+cat ~/.ssh/authorized_keys
+
+也可以查看 authorized_keys 中的公钥指纹：
+
+ssh-keygen -lf ~/.ssh/authorized_keys
+
+将该指纹与 VM1 上 vm2_test_key.pub 的指纹进行比对，确认 VM2 中保存的是 VM1 生成的公钥。
+
+八、VM2 初次修改 PasswordAuthentication
+
+阶段 2 中已创建 SSH 配置片段：
+
+/etc/ssh/sshd_config.d/99-lab-basic.conf
+
+因此，阶段 7 一开始尝试修改该文件。
+
+在 VM2 上执行：
+
+sudo nano /etc/ssh/sshd_config.d/99-lab-basic.conf
+
+将：
+
+PasswordAuthentication yes
+
+修改为：
+
+PasswordAuthentication no
+
+修改后文件内容为：
+
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+PermitEmptyPasswords no
+MaxAuthTries 6
+LogLevel VERBOSE
+
+查看配置文件：
+
+sudo cat /etc/ssh/sshd_config.d/99-lab-basic.conf
+
+确认该文件中已经显示：
+
+PasswordAuthentication no
+
+九、检查最终配置时发现问题
+
+修改 /etc/ssh/sshd_config.d/99-lab-basic.conf 后，执行：
+
+sudo sshd -T | grep -E '^(passwordauthentication|pubkeyauthentication|permitrootlogin|permitemptypasswords|maxauthtries|loglevel)'
+
+实际结果中仍然显示：
+
+passwordauthentication yes
+
+同时，VM3 上执行以下命令：
+
+ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no testuser@192.168.45.102
+
+输入密码 123456 后仍然能够成功登录 VM2。
+
+这说明：
+
+1. 99-lab-basic.conf 中虽然写了 PasswordAuthentication no。
+2. 但 OpenSSH 最终生效配置仍然是 passwordauthentication yes。
+3. 阶段 7 的禁用密码登录尚未成功。
+4. 阶段 7 必须以 sshd -T 的输出作为最终判断依据，而不能只看配置文件内容。
+
+十、排查配置冲突
+
+为查找导致 passwordauthentication yes 的配置来源，在 VM2 上执行：
+
+sudo grep -RniE '^\s*(PasswordAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication)' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf
+
+实际输出显示：
+
+/etc/ssh/sshd_config:71:KbdInteractiveAuthentication no
+/etc/ssh/sshd_config.d/50-cloud-init.conf:1:PasswordAuthentication yes
+/etc/ssh/sshd_config.d/99-lab-basic.conf:2:PasswordAuthentication no
+
+该结果说明系统中存在配置冲突：
+
+1. /etc/ssh/sshd_config.d/50-cloud-init.conf 中写有 PasswordAuthentication yes。
+2. /etc/ssh/sshd_config.d/99-lab-basic.conf 中写有 PasswordAuthentication no。
+3. 最终 sshd -T 显示 passwordauthentication yes。
+4. 导致 VM3 仍然可以通过密码登录。
+
+问题原因：
+
+Ubuntu Server 的 cloud-init 可能会生成 /etc/ssh/sshd_config.d/50-cloud-init.conf，其中包含 PasswordAuthentication yes。该配置影响 OpenSSH 的最终生效结果，导致仅修改 99-lab-basic.conf 不足以关闭密码认证。
+
+十一、修复 50-cloud-init.conf 配置
+
+为解决上述配置冲突，在 VM2 上修改：
+
+/etc/ssh/sshd_config.d/50-cloud-init.conf
+
+执行：
+
+sudo nano /etc/ssh/sshd_config.d/50-cloud-init.conf
+
+将其中的：
+
+PasswordAuthentication yes
+
+修改为：
+
+PasswordAuthentication no
+
+保存退出后查看确认：
+
+sudo cat /etc/ssh/sshd_config.d/50-cloud-init.conf
+
+预期结果：
+
+PasswordAuthentication no
+
+十二、检查 SSH 配置语法
+
+在 VM2 上执行：
+
+sudo sshd -t && echo "sshd config syntax OK"
+
+如果输出：
+
+sshd config syntax OK
+
+说明 SSH 配置语法正确，可以继续重启 SSH 服务。
+
+十三、重启 SSH 服务
+
+在 VM2 上执行：
+
+sudo systemctl restart ssh
+sudo systemctl status ssh --no-pager
+
+预期结果：
+
+Active: active (running)
+
+说明修改配置后 SSH 服务仍然正常运行。
+
+十四、验证最终生效配置
+
+在 VM2 上执行：
+
+sudo sshd -T | grep -E '^(passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|permitrootlogin|permitemptypasswords|maxauthtries|loglevel)'
+
+预期结果应包含：
+
+passwordauthentication no
+kbdinteractiveauthentication no
+pubkeyauthentication yes
+permitrootlogin no
+permitemptypasswords no
+maxauthtries 6
+loglevel VERBOSE
+
+关键检查项：
+
+1. passwordauthentication no
+   - 说明密码认证已关闭。
+
+2. kbdinteractiveauthentication no
+   - 说明键盘交互式认证关闭，避免通过 PAM 交互方式继续接受密码。
+
+3. pubkeyauthentication yes
+   - 说明公钥认证仍然开启，VM1 可以继续用私钥登录。
+
+阶段 7 的配置是否成功，应以 sshd -T 输出为准。
+
+十五、VM3 验证密码登录失败
+
+在 VM3 上执行：
+
+ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no -o KbdInteractiveAuthentication=no testuser@192.168.45.102
+
+如果提示输入密码，则输入：
+
+123456
+
+预期结果应为失败，例如：
+
+Permission denied (publickey).
+
+或者：
+
+testuser@192.168.45.102: Permission denied (publickey).
+
+如果不再进入 Ubuntu 欢迎界面，说明 SSH 密码认证已经关闭。
+
+注意：
+
+1. 这里只验证一次即可，不要连续多次尝试，避免再次触发 Fail2ban。
+2. 如果 VM3 被 Fail2ban 封禁，应先在 VM2 上执行：
+   sudo fail2ban-client set sshd unbanip 192.168.45.103
+
+十六、VM1 验证私钥登录仍然成功
+
+在 VM1 上执行：
+
+ssh -i ~/.ssh/vm2_test_key -o IdentitiesOnly=yes testuser@192.168.45.102
+
+登录成功后执行：
+
+whoami
+hostname
+exit
+
+预期结果：
+
+whoami 显示 testuser。
+hostname 显示 VM2 主机名。
+
+该验证说明：
+
+1. VM2 已关闭密码认证。
+2. VM1 合法管理端仍能通过私钥登录 VM2。
+3. 禁用密码登录没有破坏正常管理能力。
+
+十七、VM2 查看认证日志
+
+在 VM2 上执行：
+
+sudo grep -E 'Accepted publickey|Failed password|Accepted password' /var/log/auth.log | tail -n 80
+
+预期可以看到：
+
+Accepted publickey for testuser from 192.168.45.101
+
+该日志说明 VM1 已通过公钥认证成功登录 VM2。
+
+同时，阶段 7 完成后不应再出现新的来自 VM3 的 Accepted password 成功登录记录。
+
+十八、VM1 平台改用私钥连接 VM2
+
+禁用密码认证后，VM1 平台如果继续选择密码认证并输入 123456，将无法连接 VM2。因此需要将平台认证方式改为私钥认证。
+
+1. 启动 VM1 平台
+
+在 VM1 上执行：
+
+cd ~/ssh_manage_platform
+source venv/bin/activate
+python app.py
+
+浏览器访问：
+
+http://192.168.45.101:5000
+
+2. 首页连接测试
+
+在平台首页填写：
+
+目标 IP：192.168.45.102
+SSH 端口：22
+用户名：testuser
+认证方式：私钥认证
+密码或私钥路径：/home/yry/.ssh/vm2_test_key
+
+说明：
+
+如果 VM1 用户名不是 yry，应使用实际路径。可在 VM1 执行：
+
+realpath ~/.ssh/vm2_test_key
+
+将输出路径填入平台。
+
+点击：
+
+执行连接测试
+
+预期结果：
+
+连接成功
+whoami 输出：testuser
+hostname 输出：VM2 主机名
+
+这说明平台能够在禁用密码登录后，继续通过私钥认证管理 VM2。
+
+十九、VM1 平台安全检查
+
+浏览器访问：
+
+http://192.168.45.101:5000/security
+
+填写：
+
+目标 IP：192.168.45.102
+SSH 端口：22
+用户名：testuser
+认证方式：私钥认证
+密码或私钥路径：/home/yry/.ssh/vm2_test_key
+
+点击：
+
+执行 sshd -T 安全检查
+
+预期安全检查表格中显示：
+
+passwordauthentication no
+pubkeyauthentication yes
+permitrootlogin no
+
+该页面可以作为阶段 7 的平台侧验证证据。
+
+二十、VM1 平台日志查看
+
+浏览器访问：
+
+http://192.168.45.101:5000/logs
+
+填写：
+
+目标 IP：192.168.45.102
+SSH 端口：22
+用户名：testuser
+认证方式：私钥认证
+密码或私钥路径：/home/yry/.ssh/vm2_test_key
+
+点击：
+
+读取并分析 auth.log
+
+预期关键原始日志中可以看到：
+
+Accepted publickey for testuser from 192.168.45.101
+
+该记录证明 VM1 管理平台当前通过私钥认证连接 VM2。
+
+二十一、阶段 7 遇到的问题与解决
+
+问题描述：
+
+修改 /etc/ssh/sshd_config.d/99-lab-basic.conf 中 PasswordAuthentication no 后，执行 sshd -T 仍显示：
+
+passwordauthentication yes
+
+同时 VM3 仍然可以使用：
+
+ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no testuser@192.168.45.102
+
+通过密码 123456 登录 VM2。
+
+原因分析：
+
+通过 grep 检查发现：
+
+/etc/ssh/sshd_config.d/50-cloud-init.conf:1:PasswordAuthentication yes
+/etc/ssh/sshd_config.d/99-lab-basic.conf:2:PasswordAuthentication no
+
+系统中存在 cloud-init 生成的 50-cloud-init.conf，其中仍然设置 PasswordAuthentication yes，导致 OpenSSH 最终生效配置没有变为 no。
+
+解决方法：
+
+将 /etc/ssh/sshd_config.d/50-cloud-init.conf 中的：
+
+PasswordAuthentication yes
+
+修改为：
+
+PasswordAuthentication no
+
+然后执行：
+
+sudo sshd -t
+sudo systemctl restart ssh
+sudo sshd -T | grep -E '^(passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|permitrootlogin|permitemptypasswords|maxauthtries|loglevel)'
+
+确认最终生效结果为：
+
+passwordauthentication no
+kbdinteractiveauthentication no
+pubkeyauthentication yes
+
+最终验证：
+
+1. VM3 密码登录失败。
+2. VM1 私钥登录成功。
+3. VM1 平台私钥连接成功。
+4. 平台安全检查显示 passwordauthentication no。
+
+经验总结：
+
+SSH 配置修改后不能只看配置文件内容，必须使用 sshd -T 查看最终生效配置。尤其在 Ubuntu Server 中，/etc/ssh/sshd_config.d/ 目录下可能存在 cloud-init 生成的配置文件，导致多个配置片段之间产生冲突。
+
+二十二、阶段 7 截图记录
+
+本阶段建议保留以下截图：
+
+1. VM1 生成密钥对截图
+   - 证明已生成 vm2_test_key 和 vm2_test_key.pub
+
+2. VM1 公钥指纹截图
+   - 证明可识别该密钥
+
+3. VM1 ssh-copy-id 成功截图
+   - 证明公钥已复制到 VM2
+
+4. VM1 禁用密码前私钥登录成功截图
+   - 证明公钥认证可用
+
+5. VM2 authorized_keys 截图
+   - 证明 VM2 保存了 VM1 公钥
+
+6. VM2 修改 99-lab-basic.conf 后截图
+   - 证明已尝试配置 PasswordAuthentication no
+
+7. VM2 sshd -T 仍显示 passwordauthentication yes 截图
+   - 作为排错证据
+
+8. VM3 仍可密码登录截图
+   - 作为排错证据，证明只改 99-lab-basic.conf 不足以生效
+
+9. VM2 grep 查找配置冲突截图
+   - 证明 50-cloud-init.conf 中存在 PasswordAuthentication yes
+
+10. VM2 修改 50-cloud-init.conf 截图
+    - 证明已将 cloud-init 配置改为 PasswordAuthentication no
+
+11. VM2 sshd -t 语法检查成功截图
+    - 证明配置语法正确
+
+12. VM2 systemctl status ssh 截图
+    - 证明 SSH 重启后正常运行
+
+13. VM2 sshd -T 显示 passwordauthentication no 截图
+    - 证明最终配置生效
+
+14. VM3 密码登录失败截图
+    - 证明攻击端无法再通过密码登录
+
+15. VM1 私钥登录成功截图
+    - 证明合法管理端仍可登录
+
+16. VM2 auth.log 中 Accepted publickey 截图
+    - 证明公钥认证成功记录
+
+17. VM1 平台私钥连接成功截图
+    - 证明平台可切换为私钥认证
+
+18. VM1 平台安全检查 passwordauthentication no 截图
+    - 证明平台可展示防御后配置
+
+19. VM1 平台日志 Accepted publickey 截图
+    - 证明平台可读取公钥登录日志
+
+建议截图目录：
+
+screenshots/07_disable_password/
+├── 01_VM1_generate_keypair.png
+├── 02_VM1_key_fingerprint.png
+├── 03_VM1_ssh_copy_id_success.png
+├── 04_VM1_key_login_success_before_disable_password.png
+├── 05_VM2_authorized_keys_contains_VM1_pubkey.png
+├── 06_VM2_99_lab_basic_passwordauthentication_no.png
+├── 07_VM2_sshd_T_still_passwordauthentication_yes.png
+├── 08_VM3_password_login_still_success_before_fix.png
+├── 09_VM2_find_passwordauthentication_conflict.png
+├── 10_VM2_50_cloud_init_passwordauthentication_no.png
+├── 11_VM2_sshd_t_ok.png
+├── 12_VM2_ssh_restart_active.png
+├── 13_VM2_sshd_T_passwordauthentication_no.png
+├── 14_VM3_password_login_failed.png
+├── 15_VM1_key_login_success_after_disable_password.png
+├── 16_VM2_auth_log_publickey_success.png
+├── 17_VM1_platform_key_connect_success.png
+├── 18_VM1_platform_security_passwordauthentication_no.png
+└── 19_VM1_platform_logs_publickey_success.png
+
+二十三、阶段 7 验收结果
+
+阶段 7 完成后，应满足以下条件：
+
+1. VM1 上存在 ~/.ssh/vm2_test_key。
+2. VM1 上存在 ~/.ssh/vm2_test_key.pub。
+3. VM2 的 authorized_keys 中包含 VM1 的公钥。
+4. VM1 可以使用 vm2_test_key 私钥登录 VM2。
+5. /etc/ssh/sshd_config.d/99-lab-basic.conf 中 PasswordAuthentication 为 no。
+6. /etc/ssh/sshd_config.d/50-cloud-init.conf 中 PasswordAuthentication 为 no。
+7. sshd -T 显示 passwordauthentication no。
+8. sshd -T 显示 pubkeyauthentication yes。
+9. VM3 使用密码 123456 登录 VM2 失败。
+10. VM1 使用私钥登录 VM2 成功。
+11. VM2 auth.log 中出现 Accepted publickey for testuser from 192.168.45.101。
+12. VM1 平台使用私钥路径可以连接 VM2。
+13. VM1 平台安全检查显示 passwordauthentication no。
+14. VM1 平台日志页面可以显示 Accepted publickey。
+
+二十四、阶段 7 实验结论
+
+本阶段验证了禁用 SSH 密码登录对弱口令暴力破解攻击的防御效果。
+
+首先，在 VM1 管理端生成 Ed25519 密钥对，并将公钥添加到 VM2 的 testuser authorized_keys 中。确认 VM1 可以使用私钥成功登录 VM2 后，再开始关闭 SSH 密码认证。初次修改 /etc/ssh/sshd_config.d/99-lab-basic.conf 中的 PasswordAuthentication no 后，发现 sshd -T 仍显示 passwordauthentication yes，且 VM3 仍可使用密码登录。通过排查发现，/etc/ssh/sshd_config.d/50-cloud-init.conf 中仍存在 PasswordAuthentication yes，导致最终配置未按预期生效。
+
+随后将 50-cloud-init.conf 中的 PasswordAuthentication 修改为 no，并通过 sshd -t 检查配置语法、重启 SSH 服务，再次使用 sshd -T 验证，最终显示 passwordauthentication no、pubkeyauthentication yes。配置生效后，VM3 攻击端尝试使用 testuser / 123456 进行密码登录失败，说明 SSH 服务已不再接受密码认证。同时，VM1 管理端仍然可以使用私钥正常登录 VM2，VM1 管理平台也可以切换为私钥认证继续连接 VM2、查看日志并执行安全检查。
+
+实验表明，禁用密码登录后，攻击者无法再通过密码字典猜测获得 SSH 登录权限；合法管理端仍可通过公钥认证方式完成远程管理。该防御措施能够有效缓解阶段 5 中验证出的 SSH 弱口令暴力破解风险。
+
+阶段 7 已完成，可以进入阶段 8：私钥泄露与密钥轮换实验。
